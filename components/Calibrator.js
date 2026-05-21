@@ -16,12 +16,17 @@ const GRAB_RADIUS = 26;
 const LOUPE_ZOOM = 6;
 const LOUPE_SIZE = 150;
 
-export default function Calibrator() {
+export default function Calibrator({
+  embedded = false,
+  initialFrame = null,
+  onFrameConsumed,
+}) {
   const canvasRef = useRef(null);
   const loupeRef = useRef(null);
   const imgRef = useRef(null);
   const fileInputRef = useRef(null);
   const objectUrlRef = useRef(null);
+  const lastInitialFrameRef = useRef(null);
 
   const [imageName, setImageName] = useState("");
   const [imageLoaded, setImageLoaded] = useState(false);
@@ -70,6 +75,17 @@ export default function Calibrator() {
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     };
   }, []);
+
+  // Si el padre nos pasa un frame (por ejemplo extraído de un video), cargarlo
+  // automáticamente. Se compara por identidad del File para no recargar en cada
+  // render — solo cuando llega un objeto nuevo.
+  useEffect(() => {
+    if (!initialFrame) return;
+    if (lastInitialFrameRef.current === initialFrame) return;
+    lastInitialFrameRef.current = initialFrame;
+    loadFile(initialFrame);
+    onFrameConsumed?.();
+  }, [initialFrame, loadFile, onFrameConsumed]);
 
   const onDrop = (e) => {
     e.preventDefault();
@@ -299,16 +315,17 @@ export default function Calibrator() {
   const nextCorner = corners.length < 4 ? corners.length : -1;
 
   return (
-    <div className="wrap">
-      {/* ── Header ── */}
-      <header className="header">
-        <div className="brand">
-          <span className="brand-mark">MIRA</span>
-          <span className="brand-sep">/</span>
-          <span className="brand-sub">Calibrador de cancha · CLARA</span>
-        </div>
-        <span className="brand-ver">v0.1 — Fase 1</span>
-      </header>
+    <div className={"wrap" + (embedded ? " embedded" : "")}>
+      {!embedded && (
+        <header className="header">
+          <div className="brand">
+            <span className="brand-mark">MIRA</span>
+            <span className="brand-sep">/</span>
+            <span className="brand-sub">Calibrador de cancha · CLARA</span>
+          </div>
+          <span className="brand-ver">v0.1 — Fase 1</span>
+        </header>
+      )}
 
       <div className="layout">
         {/* ── Lienzo ── */}
@@ -506,6 +523,13 @@ export default function Calibrator() {
           min-height: 100vh;
           display: flex;
           flex-direction: column;
+        }
+        .wrap.embedded {
+          min-height: 0;
+          flex: 1;
+        }
+        .wrap.embedded .court-canvas {
+          max-height: calc(100vh - 200px);
         }
         .header {
           display: flex;
