@@ -21,6 +21,7 @@ export default function Calibrator() {
   const loupeRef = useRef(null);
   const imgRef = useRef(null);
   const fileInputRef = useRef(null);
+  const objectUrlRef = useRef(null);
 
   const [imageName, setImageName] = useState("");
   const [imageLoaded, setImageLoaded] = useState(false);
@@ -31,10 +32,19 @@ export default function Calibrator() {
   const [videoRef, setVideoRef] = useState("video.mp4");
   const [cursor, setCursor] = useState(null); // {x,y,clientX,clientY}
   const [naturalSize, setNaturalSize] = useState([0, 0]);
+  const [loadError, setLoadError] = useState("");
 
   // ── Carga de imagen ──────────────────────────────────────
   const loadFile = useCallback((file) => {
-    if (!file || !file.type.startsWith("image/")) return;
+    if (!file || !file.type.startsWith("image/")) {
+      setLoadError("El archivo no es una imagen válida.");
+      return;
+    }
+    setLoadError("");
+    // Liberar URL anterior antes de crear la nueva
+    if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    const url = URL.createObjectURL(file);
+    objectUrlRef.current = url;
     const img = new Image();
     img.onload = () => {
       imgRef.current = img;
@@ -42,11 +52,23 @@ export default function Calibrator() {
       setImageLoaded(true);
       setCorners([]);
     };
-    img.src = URL.createObjectURL(file);
+    img.onerror = () => {
+      setLoadError("No se pudo decodificar la imagen.");
+      URL.revokeObjectURL(url);
+      if (objectUrlRef.current === url) objectUrlRef.current = null;
+    };
+    img.src = url;
     setImageName(file.name);
     // Sugerir nombre de video a partir del frame
     const base = file.name.replace(/\.(png|jpe?g|webp)$/i, "");
     setVideoRef(base + ".mp4");
+  }, []);
+
+  // Liberar la URL del blob al desmontar el componente
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
+    };
   }, []);
 
   const onDrop = (e) => {
@@ -101,9 +123,19 @@ export default function Calibrator() {
 
   const onCanvasUp = () => setDragIndex(-1);
   const onCanvasLeave = () => {
+    // Solo escondemos la lupa: el drag sigue vivo mientras el botón esté
+    // presionado — un mouseup global lo termina (ver useEffect más abajo).
     setCursor(null);
-    setDragIndex(-1);
   };
+
+  // Mouseup global: termina cualquier drag aunque el usuario suelte el botón
+  // fuera del canvas.
+  useEffect(() => {
+    if (dragIndex < 0) return;
+    const up = () => setDragIndex(-1);
+    window.addEventListener("mouseup", up);
+    return () => window.removeEventListener("mouseup", up);
+  }, [dragIndex]);
 
   // ── Render del canvas principal ──────────────────────────
   useEffect(() => {
@@ -193,14 +225,13 @@ export default function Calibrator() {
   }, [imageLoaded, corners, halfCourt, ppm]);
 
   // ── Render de la lupa ────────────────────────────────────
+  // Nota: durante el arrastre mantenemos la lupa visible — sigue siendo útil
+  // para ver al detalle hacia dónde arrastras la esquina.
   useEffect(() => {
     const lp = loupeRef.current;
     if (!lp) return;
     const ctx = lp.getContext("2d");
     ctx.clearRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
-    if (!cursor || !imageLoaded || dragIndex >= 0) {
-      // Durante el arrastre la lupa sigue siendo útil → mantener
-    }
     if (!cursor || !imageLoaded) return;
     const img = imgRef.current;
     const src = LOUPE_SIZE / LOUPE_ZOOM;
@@ -230,13 +261,24 @@ export default function Calibrator() {
   // ── Exportar cal.json ────────────────────────────────────
   const exportJson = () => {
     if (corners.length !== 4) return;
-    const cal = buildCalibration({
-      corners: corners.map((c) => [c.x, c.y]),
-      frameShape: [naturalSize[1], naturalSize[0]],
-      halfCourt,
-      videoReference: videoRef,
-      ppm,
-    });
+    let cal;
+    try {
+      cal = buildCalibration({
+        corners: corners.map((c) => [c.x, c.y]),
+        frameShape: [naturalSize[1], naturalSize[0]],
+        halfCourt,
+        videoReference: videoRef,
+        ppm,
+      });
+    } catch (err) {
+      // Esquinas degeneradas (colineales o coincidentes) → homografía inválida
+      alert(
+        "No se pudo calcular la homografía: " +
+          (err?.message || "esquinas inválidas") +
+          ".\nAjusta las esquinas y vuelve a intentar."
+      );
+      return;
+    }
     const blob = new Blob([JSON.stringify(cal, null, 2)], {
       type: "application/json",
     });
@@ -286,6 +328,7 @@ export default function Calibrator() {
                   <br />
                   Extrae el frame con el Frame Extractor o cualquier captura.
                 </div>
+                {loadError && <div className="dz-error">{loadError}</div>}
               </div>
             </div>
           ) : (
@@ -544,6 +587,12 @@ export default function Calibrator() {
           font-size: 12px;
           color: var(--text-dim);
           line-height: 1.7;
+        }
+        .dz-error {
+          margin-top: 14px;
+          font-size: 12px;
+          color: var(--bad);
+          font-family: var(--mono);
         }
         .canvas-host {
           position: relative;
