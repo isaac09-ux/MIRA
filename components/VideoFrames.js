@@ -266,97 +266,68 @@ export default function VideoFrames({ onUseFrame }) {
       <div className="layout">
         {/* ── Stage ── */}
         <main className="stage">
-          {!videoLoaded ? (
-            <div
-              className="dropzone"
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={onDrop}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <div className="dz-inner">
-                <div className="dz-icon">[ ▶ ]</div>
-                <div className="dz-title">Carga un video</div>
-                <div className="dz-hint">
-                  Arrastra un .mp4 / .webm / .mov aquí, o haz clic para elegir.
-                  <br />
-                  Puedes navegar y extraer un frame puntual o todos a intervalos.
-                </div>
-                {loadError && <div className="dz-error">{loadError}</div>}
-              </div>
-              {/* El <video> queda montado pero oculto antes de cargar para que
-                  el src se pueda asignar sin remount. */}
-              <video
-                ref={videoElRef}
-                style={{ display: "none" }}
-                preload="metadata"
-                playsInline
-                onLoadedMetadata={onLoadedMetadata}
-                onTimeUpdate={onTimeUpdate}
-                onSeeked={onSeeked}
-                onError={onVideoError}
-                onPlay={onPlay}
-                onPause={onPause}
-              />
-            </div>
-          ) : (
-            <div className="player-host">
-              <video
-                ref={videoElRef}
-                className="video-el"
-                preload="metadata"
-                playsInline
-                onLoadedMetadata={onLoadedMetadata}
-                onTimeUpdate={onTimeUpdate}
-                onSeeked={onSeeked}
-                onError={onVideoError}
-                onPlay={onPlay}
-                onPause={onPause}
-              />
+          {/* El <video> se monta UNA sola vez y se reutiliza. Si lo metiéramos
+              dentro del condicional !videoLoaded / videoLoaded, React lo
+              desmontaría justo después de cargar el src y el segundo elemento
+              quedaría sin fuente (frame negro). */}
+          <div className={"player-host" + (videoLoaded ? "" : " hidden")}>
+            <video
+              ref={videoElRef}
+              className="video-el"
+              preload="metadata"
+              playsInline
+              onLoadedMetadata={onLoadedMetadata}
+              onTimeUpdate={onTimeUpdate}
+              onSeeked={onSeeked}
+              onError={onVideoError}
+              onPlay={onPlay}
+              onPause={onPause}
+            />
 
-              {/* ── Barra de navegación del video ── */}
-              <div className="navbar" aria-label="Barra de navegación del video">
-                <button
-                  className="navbtn"
-                  onClick={() => seekTo(0)}
-                  title="Ir al inicio"
-                  aria-label="Ir al inicio"
-                >
-                  ⏮
-                </button>
-                <button
-                  className="navbtn"
-                  onClick={() => stepFrame(-1)}
-                  title="Frame anterior"
-                  aria-label="Frame anterior"
-                >
-                  ◀
-                </button>
-                <button
-                  className="navbtn play"
-                  onClick={togglePlay}
-                  title={playing ? "Pausar" : "Reproducir"}
-                  aria-label={playing ? "Pausar" : "Reproducir"}
-                >
-                  {playing ? "❚❚" : "▶"}
-                </button>
-                <button
-                  className="navbtn"
-                  onClick={() => stepFrame(1)}
-                  title="Frame siguiente"
-                  aria-label="Frame siguiente"
-                >
-                  ▶
-                </button>
-                <button
-                  className="navbtn"
-                  onClick={() => seekTo(duration)}
-                  title="Ir al final"
-                  aria-label="Ir al final"
-                >
-                  ⏭
-                </button>
-                <div className="scrubber-wrap">
-                  <input
+            {/* ── Barra de navegación del video ── */}
+            <div className="navbar" aria-label="Barra de navegación del video">
+              <button
+                className="navbtn"
+                onClick={() => seekTo(0)}
+                title="Ir al inicio"
+                aria-label="Ir al inicio"
+              >
+                ⏮
+              </button>
+              <button
+                className="navbtn"
+                onClick={() => stepFrame(-1)}
+                title="Frame anterior"
+                aria-label="Frame anterior"
+              >
+                ◀
+              </button>
+              <button
+                className="navbtn play"
+                onClick={togglePlay}
+                title={playing ? "Pausar" : "Reproducir"}
+                aria-label={playing ? "Pausar" : "Reproducir"}
+              >
+                {playing ? "❚❚" : "▶"}
+              </button>
+              <button
+                className="navbtn"
+                onClick={() => stepFrame(1)}
+                title="Frame siguiente"
+                aria-label="Frame siguiente"
+              >
+                ▶
+              </button>
+              <button
+                className="navbtn"
+                onClick={() => seekTo(duration)}
+                title="Ir al final"
+                aria-label="Ir al final"
+              >
+                ⏭
+              </button>
+              <div className="scrubber-wrap">
+                <input
                     type="range"
                     className="scrubber"
                     min={0}
@@ -385,51 +356,70 @@ export default function VideoFrames({ onUseFrame }) {
                 </div>
               </div>
 
-              {/* ── Galería de frames extraídos ── */}
-              {extracted.length > 0 && (
-                <div className="gallery">
-                  <div className="gallery-head">
-                    <span className="gallery-title">
-                      Frames extraídos ({extracted.length})
-                    </span>
-                    <button className="link" onClick={clearExtracted}>
-                      Limpiar
-                    </button>
-                  </div>
-                  <div className="thumbs">
-                    {extracted.map((f, i) => (
-                      <div key={i} className="thumb">
-                        {/* eslint-disable-next-line @next/next/no-img-element */}
-                        <img src={f.url} alt={`Frame en ${fmtTime(f.time)}`} />
-                        <div className="thumb-time">{fmtTime(f.time)}</div>
-                        <div className="thumb-actions">
-                          <button
-                            className="thumb-btn"
-                            onClick={() => seekTo(f.time)}
-                            title="Saltar a este punto"
-                          >
-                            ↩
-                          </button>
-                          <button
-                            className="thumb-btn"
-                            onClick={() => useExtracted(f)}
-                            title="Calibrar con este frame"
-                          >
-                            ⊕
-                          </button>
-                          <button
-                            className="thumb-btn"
-                            onClick={() => downloadExtracted(f)}
-                            title="Descargar PNG"
-                          >
-                            ↓
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+            {/* ── Galería de frames extraídos ── */}
+            {extracted.length > 0 && (
+              <div className="gallery">
+                <div className="gallery-head">
+                  <span className="gallery-title">
+                    Frames extraídos ({extracted.length})
+                  </span>
+                  <button className="link" onClick={clearExtracted}>
+                    Limpiar
+                  </button>
                 </div>
-              )}
+                <div className="thumbs">
+                  {extracted.map((f, i) => (
+                    <div key={i} className="thumb">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img src={f.url} alt={`Frame en ${fmtTime(f.time)}`} />
+                      <div className="thumb-time">{fmtTime(f.time)}</div>
+                      <div className="thumb-actions">
+                        <button
+                          className="thumb-btn"
+                          onClick={() => seekTo(f.time)}
+                          title="Saltar a este punto"
+                        >
+                          ↩
+                        </button>
+                        <button
+                          className="thumb-btn"
+                          onClick={() => useExtracted(f)}
+                          title="Calibrar con este frame"
+                        >
+                          ⊕
+                        </button>
+                        <button
+                          className="thumb-btn"
+                          onClick={() => downloadExtracted(f)}
+                          title="Descargar PNG"
+                        >
+                          ↓
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {!videoLoaded && (
+            <div
+              className="dropzone"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={onDrop}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <div className="dz-inner">
+                <div className="dz-icon">[ ▶ ]</div>
+                <div className="dz-title">Carga un video</div>
+                <div className="dz-hint">
+                  Arrastra un .mp4 / .webm / .mov aquí, o haz clic para elegir.
+                  <br />
+                  Puedes navegar y extraer un frame puntual o todos a intervalos.
+                </div>
+                {loadError && <div className="dz-error">{loadError}</div>}
+              </div>
             </div>
           )}
 
@@ -612,6 +602,9 @@ export default function VideoFrames({ onUseFrame }) {
           display: flex;
           flex-direction: column;
           gap: 10px;
+        }
+        .player-host.hidden {
+          display: none;
         }
         .video-el {
           width: 100%;

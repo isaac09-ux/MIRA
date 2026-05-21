@@ -49,3 +49,18 @@ describe("VideoFrames — carga de archivos", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("VideoFrames — estructura del DOM", () => {
+  // Regresión: el <video> tiene que estar montado desde el render inicial
+  // (incluso con el dropzone visible). Si se montara solo después de cargar,
+  // el <video> que recibe el src vía videoElRef se desmontaría justo después
+  // de disparar onLoadedMetadata, dejando el segundo elemento sin source y
+  // mostrando un frame negro.
+  test("el <video> se monta desde el primer render (no detrás del dropzone)", () => {
+    const { container } = render(<VideoFrames />);
+    const videos = container.querySelectorAll("video");
+    expect(videos).toHaveLength(1);
+    // Y el dropzone está visible al mismo tiempo
+    expect(screen.getByText(/Carga un video/i)).toBeInTheDocument();
+  });
+});
