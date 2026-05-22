@@ -142,4 +142,44 @@ describe("Calibrator — carga de archivos", () => {
     ).toBeInTheDocument();
     expect(revokedUrls).toContain(createdUrls[0]);
   });
+
+  test("unmount durante la decodificación: no warning ni setState fantasma", async () => {
+    // Si el usuario cambia de pestaña mientras la imagen decodifica, el
+    // componente se desmonta antes de img.onload. Sin la guard, React tira
+    // "Can't perform state update on an unmounted component". Acá verificamos
+    // que no quede esa advertencia en consola.
+    installImageMock({ w: 100, h: 100 });
+    const errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    const { container, unmount } = render(<Calibrator />);
+    const input = container.querySelector('input[type="file"]');
+    fireEvent.change(input, {
+      target: { files: [new File(["a"], "a.png", { type: "image/png" })] },
+    });
+    // Desmontar ANTES del setTimeout(0) que dispara onload.
+    unmount();
+    await new Promise((r) => setTimeout(r, 5));
+    const calls = errSpy.mock.calls.map((c) => String(c[0] || ""));
+    expect(
+      calls.some((m) => /unmounted component|memory leak/i.test(m))
+    ).toBe(false);
+    errSpy.mockRestore();
+    // Y la URL debe haberse revocado en el cleanup.
+    expect(revokedUrls).toContain(createdUrls[0]);
+  });
+});
+
+describe("Calibrator — input ppm robusto", () => {
+  test("ppm queda clampeado en [10,120] aún tecleando un valor fuera de rango", () => {
+    const { container } = render(<Calibrator />);
+    const ppmInput = container.querySelector('input[type="number"]');
+    // Por encima del techo
+    fireEvent.change(ppmInput, { target: { value: "9999" } });
+    expect(Number(ppmInput.value)).toBe(120);
+    // Por debajo del piso (pero > 0)
+    fireEvent.change(ppmInput, { target: { value: "3" } });
+    expect(Number(ppmInput.value)).toBe(10);
+    // Cero o negativo cae al default razonable
+    fireEvent.change(ppmInput, { target: { value: "0" } });
+    expect(Number(ppmInput.value)).toBe(40);
+  });
 });

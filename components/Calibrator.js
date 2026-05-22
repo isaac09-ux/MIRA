@@ -39,6 +39,10 @@ export default function Calibrator({
   const [naturalSize, setNaturalSize] = useState([0, 0]);
   const [loadError, setLoadError] = useState("");
 
+  // Flag para evitar setState si la imagen termina de decodificar después
+  // del unmount (típico al cambiar de pestaña mientras carga).
+  const mountedRef = useRef(true);
+
   // ── Carga de imagen ──────────────────────────────────────
   const loadFile = useCallback((file) => {
     if (!file || !file.type.startsWith("image/")) {
@@ -52,15 +56,21 @@ export default function Calibrator({
     objectUrlRef.current = url;
     const img = new Image();
     img.onload = () => {
+      if (!mountedRef.current) {
+        URL.revokeObjectURL(url);
+        return;
+      }
       imgRef.current = img;
       setNaturalSize([img.naturalWidth, img.naturalHeight]);
       setImageLoaded(true);
       setCorners([]);
+      setDragIndex(-1);
     };
     img.onerror = () => {
-      setLoadError("No se pudo decodificar la imagen.");
       URL.revokeObjectURL(url);
       if (objectUrlRef.current === url) objectUrlRef.current = null;
+      if (!mountedRef.current) return;
+      setLoadError("No se pudo decodificar la imagen.");
     };
     img.src = url;
     setImageName(file.name);
@@ -72,6 +82,7 @@ export default function Calibrator({
   // Liberar la URL del blob al desmontar el componente
   useEffect(() => {
     return () => {
+      mountedRef.current = false;
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
     };
   }, []);
@@ -127,7 +138,11 @@ export default function Calibrator({
     if (!imageLoaded) return;
     const p = toNatural(e.clientX, e.clientY);
     setCursor({ x: p.x, y: p.y, clientX: e.clientX, clientY: e.clientY });
-    if (dragIndex >= 0) {
+    // Guard de bounds: si las esquinas se resetearon mientras arrastrábamos
+    // (por ejemplo al cargar un frame nuevo desde el extractor de video),
+    // dragIndex puede haber quedado apuntando fuera del array. Sin esto
+    // generaba esquinas fantasma con índices sparse.
+    if (dragIndex >= 0 && dragIndex < corners.length) {
       const next = [...corners];
       next[dragIndex] = {
         x: Math.max(0, Math.min(naturalSize[0], p.x)),
@@ -362,13 +377,21 @@ export default function Calibrator({
                 <div
                   className="loupe"
                   style={{
-                    left: Math.min(
-                      cursor.clientX + 24,
-                      typeof window !== "undefined"
-                        ? window.innerWidth - LOUPE_SIZE - 12
-                        : 0
+                    left: Math.max(
+                      12,
+                      Math.min(
+                        cursor.clientX + 24,
+                        typeof window !== "undefined"
+                          ? window.innerWidth - LOUPE_SIZE - 12
+                          : 0
+                      )
                     ),
-                    top: cursor.clientY - LOUPE_SIZE - 24,
+                    // Cuando el cursor está cerca del borde superior, mostrar
+                    // la lupa debajo del cursor para que no se corte arriba.
+                    top:
+                      cursor.clientY - LOUPE_SIZE - 24 < 12
+                        ? cursor.clientY + 24
+                        : cursor.clientY - LOUPE_SIZE - 24,
                   }}
                 >
                   <canvas
@@ -477,7 +500,17 @@ export default function Calibrator({
                 value={ppm}
                 min={10}
                 max={120}
-                onChange={(e) => setPpm(Number(e.target.value) || 40)}
+                onChange={(e) => {
+                  // Clamp manual: el min/max del HTML sólo afecta al spinner;
+                  // tecleando se puede meter 1 o 9999 y romper la escala del
+                  // dibujo de verificación.
+                  const n = Number(e.target.value);
+                  if (!Number.isFinite(n) || n <= 0) {
+                    setPpm(40);
+                  } else {
+                    setPpm(Math.min(120, Math.max(10, n)));
+                  }
+                }}
               />
             </div>
             <div className="field">
