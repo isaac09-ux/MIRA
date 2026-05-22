@@ -689,6 +689,12 @@ export default function VideoFrames({ onUseFrame }) {
             // file picker — solo se podrían cargar con drag-and-drop.
             accept="video/*,.mp4,.webm,.mov,.m4v,.ogg,.ogv,.mkv,.avi"
             style={{ display: "none" }}
+            // Reset del value antes de abrir el picker: sin esto, re-seleccionar
+            // el mismo archivo no dispara `change` (el value del input no cambia)
+            // y "nada pasa al apretar Abrir".
+            onClick={(e) => {
+              e.currentTarget.value = "";
+            }}
             onChange={(e) => loadFile(e.target.files[0])}
           />
           {/* Canvas auxiliar para capturar frames. Off-screen. */}

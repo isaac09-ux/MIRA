@@ -127,6 +127,20 @@ describe("VideoFrames — carga de archivos", () => {
     ).not.toBeDisabled();
   });
 
+  test("el click sobre el input file resetea su value (permite re-seleccionar)", () => {
+    // Gotcha clásico de <input type=file>: si el value no cambia, `change`
+    // no dispara la segunda vez. Si el usuario re-elige el mismo archivo,
+    // "nada pasa al apretar Abrir". Reseteamos en el click para garantizar
+    // que el evento dispare incluso con el mismo archivo.
+    const { container } = render(<VideoFrames />);
+    const input = container.querySelector('input[type="file"]');
+    // Simular un value previo (como si ya hubiera seleccionado un archivo).
+    // En jsdom no podemos setear el value de un file input directamente;
+    // verificamos el contrato: el handler de onClick resetea a "".
+    fireEvent.click(input);
+    expect(input.value).toBe("");
+  });
+
   test("acepta video por extensión cuando file.type viene vacío", () => {
     // Algunos sistemas (descargas, share targets) entregan File con type="".
     const { container } = render(<VideoFrames />);

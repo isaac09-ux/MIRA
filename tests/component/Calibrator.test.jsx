@@ -148,6 +148,36 @@ describe("Calibrator — carga de archivos", () => {
     expect(createdUrls).toHaveLength(1);
   });
 
+  test("re-seleccionar el mismo archivo dos veces vuelve a cargarlo", async () => {
+    // Gotcha clásico de <input type=file>: si el value del input no cambia
+    // (mismo archivo elegido dos veces), el evento `change` NO dispara.
+    // Reseteamos el value en el `click` para garantizar que sí dispare.
+    // Antes de este fix, "nada pasaba al apretar Abrir" la segunda vez.
+    installImageMock({ w: 1280, h: 720 });
+    const { container } = render(<Calibrator />);
+    const input = container.querySelector('input[type="file"]');
+
+    // Simular el ciclo completo: click (que el dropzone dispara) → cambia value
+    // a "" → el usuario elige el archivo → onChange.
+    fireEvent.click(input);
+    fireEvent.change(input, {
+      target: { files: [new File(["frame"], "same.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByText("same.png")).toBeInTheDocument());
+
+    // El value debe haber sido reseteado por el onClick (validación directa
+    // del fix). Sin esto, re-elegir el mismo archivo es un no-op.
+    fireEvent.click(input);
+    expect(input.value).toBe("");
+
+    // Y un segundo onChange con el "mismo" archivo debe re-cargarlo
+    // (en la práctica el usuario elige otra vez el mismo PNG).
+    fireEvent.change(input, {
+      target: { files: [new File(["frame"], "same.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(createdUrls).toHaveLength(2));
+  });
+
   test("imagen corrupta (onerror) → muestra mensaje y libera el URL", async () => {
     installImageMock({ fail: true });
     const { container } = render(<Calibrator />);

@@ -449,6 +449,13 @@ export default function Calibrator({
             // ocultados del picker con solo "image/*".
             accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.avif"
             style={{ display: "none" }}
+            // Reset del value antes de abrir el picker: sin esto, re-seleccionar
+            // el MISMO archivo no dispara `change` (el value del input no cambia)
+            // y "nada pasa al apretar Abrir". Típico al re-cargar un frame que
+            // ya se había intentado cargar antes.
+            onClick={(e) => {
+              e.currentTarget.value = "";
+            }}
             onChange={(e) => loadFile(e.target.files[0])}
           />
         </main>
