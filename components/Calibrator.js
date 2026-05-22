@@ -81,12 +81,19 @@ export default function Calibrator({
       URL.revokeObjectURL(url);
       if (objectUrlRef.current === url) objectUrlRef.current = null;
       if (!mountedRef.current) return;
+      // Si el archivo es chico (< 2MB), avisar que probablemente fue
+      // extraído cuando el video estaba en negro. Para 720p+ con contenido
+      // real una imagen suele pesar más que eso.
+      const fmtSize = (n) =>
+        n >= 1_000_000
+          ? (n / 1_000_000).toFixed(2) + " MB"
+          : (n / 1000).toFixed(1) + " KB";
       setLoadError(
         "No se pudo decodificar la imagen. " +
-          (file.size < 5000
-            ? "El archivo es muy chico (" +
-              file.size +
-              " bytes) — probablemente fue extraído cuando el video estaba en negro. Re-extraé el frame desde Video/Frames."
+          (file.size < 2_000_000
+            ? "El archivo pesa " +
+              fmtSize(file.size) +
+              " — probablemente fue extraído cuando el video estaba en negro. Re-extraé el frame desde Video/Frames."
             : "El archivo podría estar corrupto.")
       );
     };
