@@ -81,7 +81,14 @@ export default function Calibrator({
       URL.revokeObjectURL(url);
       if (objectUrlRef.current === url) objectUrlRef.current = null;
       if (!mountedRef.current) return;
-      setLoadError("No se pudo decodificar la imagen.");
+      setLoadError(
+        "No se pudo decodificar la imagen. " +
+          (file.size < 5000
+            ? "El archivo es muy chico (" +
+              file.size +
+              " bytes) — probablemente fue extraído cuando el video estaba en negro. Re-extraé el frame desde Video/Frames."
+            : "El archivo podría estar corrupto.")
+      );
     };
     img.src = url;
     setImageName(file.name);
@@ -356,6 +363,20 @@ export default function Calibrator({
       <div className="layout">
         {/* ── Lienzo ── */}
         <main className="stage">
+          {/* Banner de error visible siempre (afuera del dropzone, que
+              con aspect-ratio:16/9 lo recortaba si el texto era largo). */}
+          {loadError && (
+            <div className="cal-error" role="alert">
+              <strong>Error:</strong> {loadError}
+              <button
+                className="cal-error-close"
+                onClick={() => setLoadError("")}
+                aria-label="Cerrar mensaje"
+              >
+                ×
+              </button>
+            </div>
+          )}
           {!imageLoaded ? (
             <div
               className="dropzone"
@@ -371,7 +392,6 @@ export default function Calibrator({
                   <br />
                   Extrae el frame con el Frame Extractor o cualquier captura.
                 </div>
-                {loadError && <div className="dz-error">{loadError}</div>}
               </div>
             </div>
           ) : (
@@ -620,10 +640,43 @@ export default function Calibrator({
         .stage {
           padding: 24px;
           display: flex;
+          flex-direction: column;
           align-items: center;
           justify-content: center;
           background: var(--bg);
           overflow: auto;
+          gap: 14px;
+        }
+        .cal-error {
+          width: 100%;
+          max-width: 640px;
+          padding: 10px 14px;
+          background: rgba(184, 60, 60, 0.12);
+          border: 1px solid var(--bad, #b83c3c);
+          border-radius: 6px;
+          color: var(--text);
+          font-size: 12px;
+          line-height: 1.5;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .cal-error strong {
+          color: var(--bad, #b83c3c);
+        }
+        .cal-error-close {
+          background: none;
+          border: none;
+          color: var(--text-dim);
+          font-size: 18px;
+          line-height: 1;
+          cursor: pointer;
+          padding: 0 4px;
+          flex-shrink: 0;
+        }
+        .cal-error-close:hover {
+          color: var(--text);
         }
         .dropzone {
           width: 100%;
