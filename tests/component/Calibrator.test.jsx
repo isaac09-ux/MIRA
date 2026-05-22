@@ -129,6 +129,25 @@ describe("Calibrator — carga de archivos", () => {
     expect(revokedUrls).toContain(createdUrls[0]);
   });
 
+  test("acepta imagen por extensión cuando file.type viene vacío", async () => {
+    // PNG re-descargados (OneDrive, share targets, drag-drop desde el
+    // explorador en algunos SO) llegan con type="" y antes los rechazábamos
+    // como "no es una imagen válida".
+    installImageMock({ w: 640, h: 480 });
+    const { container } = render(<Calibrator />);
+    const input = container.querySelector('input[type="file"]');
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "frame.png", { type: "" })] },
+    });
+    await waitFor(() => {
+      expect(screen.getByText("frame.png")).toBeInTheDocument();
+    });
+    expect(
+      screen.queryByText(/El archivo no es una imagen válida/i)
+    ).not.toBeInTheDocument();
+    expect(createdUrls).toHaveLength(1);
+  });
+
   test("imagen corrupta (onerror) → muestra mensaje y libera el URL", async () => {
     installImageMock({ fail: true });
     const { container } = render(<Calibrator />);

@@ -38,6 +38,15 @@ function fireLoadedMetadata(container, { duration = 10, w = 1280, h = 720 } = {}
   return video;
 }
 
+// Simula que el navegador ya decodificó el primer frame (readyState=2).
+// Sin esto los botones de captura quedan deshabilitados — drawImage daría negro.
+function fireLoadedData(container) {
+  const video = container.querySelector("video");
+  Object.defineProperty(video, "readyState", { value: 2, configurable: true });
+  fireEvent(video, new Event("loadeddata"));
+  return video;
+}
+
 describe("VideoFrames — estado inicial", () => {
   test("renderiza el dropzone con instrucciones", () => {
     render(<VideoFrames />);
@@ -92,6 +101,7 @@ describe("VideoFrames — carga de archivos", () => {
       target: { files: [new File(["fake"], "v.mp4", { type: "video/mp4" })] },
     });
     fireLoadedMetadata(container, { duration: 10, w: 1280, h: 720 });
+    fireLoadedData(container);
 
     // El <video> debe ser EL MISMO nodo del DOM (no se remontó).
     const videoAfter = container.querySelector("video");
@@ -106,6 +116,49 @@ describe("VideoFrames — carga de archivos", () => {
     ).not.toBeDisabled();
     expect(
       screen.getByRole("button", { name: /Extraer todos/i })
+    ).not.toBeDisabled();
+  });
+
+  test("acepta video por extensión cuando file.type viene vacío", () => {
+    // Algunos sistemas (descargas, share targets) entregan File con type="".
+    const { container } = render(<VideoFrames />);
+    const input = container.querySelector('input[type="file"]');
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "v.mp4", { type: "" })] },
+    });
+    // No debe mostrar el error de archivo inválido.
+    expect(
+      screen.queryByText(/El archivo no es un video válido/i)
+    ).not.toBeInTheDocument();
+    // Y sí debe haber creado la object URL para el blob.
+    expect(createdUrls).toHaveLength(1);
+  });
+
+  test("los botones quedan deshabilitados hasta que loadeddata pinte el primer frame", () => {
+    // Regresión: con preload="metadata", el <video> no decodifica nada y
+    // drawImage capturaba un canvas negro. Ahora "Extraer este frame" y
+    // "Calibrar con este frame" exigen hasFrame=true.
+    const { container } = render(<VideoFrames />);
+    fireEvent.change(container.querySelector('input[type="file"]'), {
+      target: { files: [new File(["x"], "v.mp4", { type: "video/mp4" })] },
+    });
+    fireLoadedMetadata(container, { duration: 10, w: 320, h: 240 });
+
+    // Sin loadeddata, los botones de captura siguen deshabilitados.
+    expect(
+      screen.getByRole("button", { name: /Cargando frame/i })
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Calibrar con este frame/i })
+    ).toBeDisabled();
+
+    fireLoadedData(container);
+
+    expect(
+      screen.getByRole("button", { name: /Extraer este frame/i })
+    ).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Calibrar con este frame/i })
     ).not.toBeDisabled();
   });
 });

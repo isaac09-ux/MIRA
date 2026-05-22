@@ -29,6 +29,9 @@ export default function VideoFrames({ onUseFrame }) {
   const [naturalSize, setNaturalSize] = useState([0, 0]);
   const [loadError, setLoadError] = useState("");
   const [playing, setPlaying] = useState(false);
+  // true cuando el <video> ya pintó al menos un frame en su buffer. Sin esto
+  // drawImage() captura un canvas vacío (negro) y la galería sale en negro.
+  const [hasFrame, setHasFrame] = useState(false);
 
   const [intervalSec, setIntervalSec] = useState(1);
   const [extracted, setExtracted] = useState([]); // [{time, url}]
@@ -65,7 +68,17 @@ export default function VideoFrames({ onUseFrame }) {
   // ── Carga de archivo ──────────────────────────────────────
   const loadFile = useCallback(
     (file) => {
-      if (!file || !file.type.startsWith("video/")) {
+      if (!file) {
+        setLoadError("No se eligió archivo.");
+        return;
+      }
+      // Algunos sistemas/descargas no rellenan file.type. Aceptamos por
+      // extensión como fallback para no rechazar videos válidos.
+      const isVideoByType = file.type?.startsWith("video/");
+      const isVideoByExt = /\.(mp4|webm|mov|m4v|ogg|ogv|mkv|avi)$/i.test(
+        file.name || ""
+      );
+      if (!isVideoByType && !isVideoByExt) {
         setLoadError("El archivo no es un video válido.");
         return;
       }
@@ -91,6 +104,7 @@ export default function VideoFrames({ onUseFrame }) {
       setNaturalSize([0, 0]);
       setCurrentTime(0);
       setPlaying(false);
+      setHasFrame(false);
       // El <video> ya está montado; solo cambiamos src.
       if (videoElRef.current) {
         videoElRef.current.pause();
@@ -117,14 +131,31 @@ export default function VideoFrames({ onUseFrame }) {
     setNaturalSize([v.videoWidth, v.videoHeight]);
     setVideoLoaded(true);
     setCurrentTime(0);
+    setHasFrame(false);
+    // Con preload="metadata" el <video> no decodifica ningún frame: queda en
+    // negro y drawImage() captura un canvas vacío. Forzar un micro-seek
+    // dispara la decodificación del primer frame sin reproducir audio.
+    try {
+      v.currentTime = 0;
+    } catch {
+      /* algunos navegadores aún no aceptan el seek aquí; loadeddata cubrirá */
+    }
+  };
+
+  const onLoadedData = (e) => {
+    // readyState >= 2 (HAVE_CURRENT_DATA): el frame actual ya está decodificado
+    // y drawImage() puede pintarlo.
+    if (e.target.readyState >= 2) setHasFrame(true);
   };
 
   const onTimeUpdate = (e) => {
     const t = e.target.currentTime;
     setCurrentTime(Number.isFinite(t) ? t : 0);
+    if (e.target.readyState >= 2) setHasFrame(true);
   };
 
-  const onSeeked = () => {
+  const onSeeked = (e) => {
+    if (e?.target?.readyState >= 2) setHasFrame(true);
     // Si hay una extracción de "todos los frames" esperando este seek,
     // la resolvemos.
     if (seekResolverRef.current) {
@@ -185,12 +216,51 @@ export default function VideoFrames({ onUseFrame }) {
     // Sin dimensiones reales el toBlob saldría vacío y rompería al calibrador
     // con "No se pudo decodificar la imagen".
     if (!w || !h) return null;
+    // readyState < 2 = HAVE_CURRENT_DATA aún no listo: drawImage pintaría
+    // un canvas vacío (negro). Mejor abortar y dejar que el caller reintente.
+    if (v.readyState < 2) return null;
     cv.width = w;
     cv.height = h;
     const ctx = cv.getContext("2d");
     ctx.drawImage(v, 0, 0, cv.width, cv.height);
     return cv;
   }, [naturalSize]);
+
+  // Espera hasta que el <video> tenga un frame decodificado listo para pintar.
+  // Útil cuando el usuario aprieta "Extraer" antes de que cargue el primer
+  // frame, o justo después de cambiar de video.
+  const waitForFrame = useCallback(
+    (timeoutMs = 1500) =>
+      new Promise((resolve) => {
+        const v = videoElRef.current;
+        if (!v) return resolve(false);
+        if (v.readyState >= 2) return resolve(true);
+        let done = false;
+        const finish = (ok) => {
+          if (done) return;
+          done = true;
+          v.removeEventListener("loadeddata", onReady);
+          v.removeEventListener("seeked", onReady);
+          v.removeEventListener("canplay", onReady);
+          clearTimeout(to);
+          resolve(ok);
+        };
+        const onReady = () => {
+          if (v.readyState >= 2) finish(true);
+        };
+        v.addEventListener("loadeddata", onReady);
+        v.addEventListener("seeked", onReady);
+        v.addEventListener("canplay", onReady);
+        // Pequeño empujón: re-asignar currentTime obliga a decodificar.
+        try {
+          v.currentTime = v.currentTime || 0;
+        } catch {
+          /* ignore */
+        }
+        const to = setTimeout(() => finish(v.readyState >= 2), timeoutMs);
+      }),
+    []
+  );
 
   const blobFromCanvas = (cv, type = "image/png", quality) =>
     new Promise((resolve) => {
@@ -200,6 +270,12 @@ export default function VideoFrames({ onUseFrame }) {
   // ── Extraer el frame visible actual ──────────────────────
   const extractCurrentFrame = async () => {
     if (!videoLoaded) return;
+    // Si el usuario aprieta antes de que cargue el primer frame, esperar.
+    const ok = await waitForFrame();
+    if (!ok) {
+      setLoadError("El video aún no decodifica el primer frame. Reintenta.");
+      return;
+    }
     const cv = drawCurrentToCanvas();
     if (!cv) return;
     const blob = await blobFromCanvas(cv, "image/png");
@@ -216,6 +292,11 @@ export default function VideoFrames({ onUseFrame }) {
   // ── Mandar el frame actual al calibrador ─────────────────
   const sendCurrentToCalibrator = async () => {
     if (!videoLoaded || !onUseFrame) return;
+    const ok = await waitForFrame();
+    if (!ok) {
+      setLoadError("El video aún no decodifica el primer frame. Reintenta.");
+      return;
+    }
     const cv = drawCurrentToCanvas();
     if (!cv) return;
     const blob = await blobFromCanvas(cv, "image/png");
@@ -268,8 +349,14 @@ export default function VideoFrames({ onUseFrame }) {
           v.currentTime = t;
         });
         if (cancelExtractionRef.current) break;
+        // Doble guard: si el seek terminó pero readyState aún no llegó,
+        // esperar brevemente para no capturar un frame negro.
+        if (v.readyState < 2) {
+          const ok = await waitForFrame(800);
+          if (!ok) continue;
+        }
         const cv = drawCurrentToCanvas();
-        if (!cv) break;
+        if (!cv) continue;
         // JPEG en miniaturas para no explotar la memoria.
         const blob = await blobFromCanvas(cv, "image/jpeg", 0.85);
         if (cancelExtractionRef.current) break;
@@ -347,9 +434,15 @@ export default function VideoFrames({ onUseFrame }) {
             <video
               ref={videoElRef}
               className="video-el"
-              preload="metadata"
+              // "auto" en lugar de "metadata": necesitamos al menos el primer
+              // frame decodificado para que drawImage() no devuelva negro.
+              preload="auto"
+              // muted permite que el navegador decodifique sin gesto de usuario
+              // (Safari/iOS lo exigen) y evita ruido si por error se reproduce.
+              muted
               playsInline
               onLoadedMetadata={onLoadedMetadata}
+              onLoadedData={onLoadedData}
               onTimeUpdate={onTimeUpdate}
               onSeeked={onSeeked}
               onError={onVideoError}
@@ -548,14 +641,16 @@ export default function VideoFrames({ onUseFrame }) {
             </p>
             <button
               className="btn ghost"
-              disabled={!videoLoaded}
+              disabled={!videoLoaded || !hasFrame}
               onClick={extractCurrentFrame}
             >
-              Extraer este frame
+              {videoLoaded && !hasFrame
+                ? "Cargando frame…"
+                : "Extraer este frame"}
             </button>
             <button
               className="btn primary"
-              disabled={!videoLoaded}
+              disabled={!videoLoaded || !hasFrame}
               onClick={sendCurrentToCalibrator}
             >
               Calibrar con este frame

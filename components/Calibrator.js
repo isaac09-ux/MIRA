@@ -45,7 +45,18 @@ export default function Calibrator({
 
   // ── Carga de imagen ──────────────────────────────────────
   const loadFile = useCallback((file) => {
-    if (!file || !file.type.startsWith("image/")) {
+    if (!file) {
+      setLoadError("No se eligió archivo.");
+      return;
+    }
+    // Algunos navegadores/SO no rellenan file.type para PNG re-descargados
+    // (OneDrive, share targets, etc.). Aceptamos también por extensión —
+    // si el contenido no es imagen, img.onerror lo cazará abajo.
+    const isImageByType = file.type?.startsWith("image/");
+    const isImageByExt = /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(
+      file.name || ""
+    );
+    if (!isImageByType && !isImageByExt) {
       setLoadError("El archivo no es una imagen válida.");
       return;
     }
