@@ -29,6 +29,9 @@ export default function VideoFrames({ onUseFrame }) {
   const [naturalSize, setNaturalSize] = useState([0, 0]);
   const [loadError, setLoadError] = useState("");
   const [playing, setPlaying] = useState(false);
+  // true cuando el <video> ya pintó al menos un frame en su buffer. Sin esto
+  // drawImage() captura un canvas vacío (negro) y la galería sale en negro.
+  const [hasFrame, setHasFrame] = useState(false);
 
   const [intervalSec, setIntervalSec] = useState(1);
   const [extracted, setExtracted] = useState([]); // [{time, url}]
@@ -65,7 +68,17 @@ export default function VideoFrames({ onUseFrame }) {
   // ── Carga de archivo ──────────────────────────────────────
   const loadFile = useCallback(
     (file) => {
-      if (!file || !file.type.startsWith("video/")) {
+      if (!file) {
+        setLoadError("No se eligió archivo.");
+        return;
+      }
+      // Algunos sistemas/descargas no rellenan file.type. Aceptamos por
+      // extensión como fallback para no rechazar videos válidos.
+      const isVideoByType = file.type?.startsWith("video/");
+      const isVideoByExt = /\.(mp4|webm|mov|m4v|ogg|ogv|mkv|avi)$/i.test(
+        file.name || ""
+      );
+      if (!isVideoByType && !isVideoByExt) {
         setLoadError("El archivo no es un video válido.");
         return;
       }
@@ -91,6 +104,7 @@ export default function VideoFrames({ onUseFrame }) {
       setNaturalSize([0, 0]);
       setCurrentTime(0);
       setPlaying(false);
+      setHasFrame(false);
       // El <video> ya está montado; solo cambiamos src.
       if (videoElRef.current) {
         videoElRef.current.pause();
@@ -109,6 +123,13 @@ export default function VideoFrames({ onUseFrame }) {
   // ── Eventos del <video> ───────────────────────────────────
   const onLoadedMetadata = (e) => {
     const v = e.target;
+    // Validar que el archivo tenga pista de video. Un mp4 solo-audio reporta
+    // videoWidth=0 y drawImage devolvería un canvas vacío sin feedback.
+    if (!v.videoWidth || !v.videoHeight) {
+      setLoadError("El archivo no tiene pista de video.");
+      setVideoLoaded(false);
+      return;
+    }
     // Algunos webm/mp4 reportan duration=Infinity hasta haberse reproducido.
     // Si no es finita, dejamos 0: el scrubber y el cálculo de "todos los
     // frames" lo tratan como desconocido en vez de propagar NaN.
@@ -117,20 +138,77 @@ export default function VideoFrames({ onUseFrame }) {
     setNaturalSize([v.videoWidth, v.videoHeight]);
     setVideoLoaded(true);
     setCurrentTime(0);
+    // Si preload="auto" ya alcanzó readyState>=2, el primer frame está
+    // listo — habilitar los botones inmediatamente.
+    setHasFrame(v.readyState >= 2);
+    // NOTA: el micro-seek para forzar la decodificación del primer frame
+    // NO se hace aquí. Se hace en un useEffect después de que React
+    // rerenderice y el <video> deje de estar oculto (ver más abajo).
+    // Sin esa demora, Edge/Chrome ignoran el seek sobre el elemento oculto
+    // y `loadeddata` nunca dispara → botones disabled para siempre.
+  };
+
+  // Una vez que videoLoaded=true y el <video> ya está VISIBLE en el DOM,
+  // forzar el seek a 0.001 para que el browser decodifique el primer frame.
+  // OJO: currentTime=0 es no-op si ya está en 0 — por eso 0.001.
+  useEffect(() => {
+    if (!videoLoaded) return;
+    const v = videoElRef.current;
+    if (!v) return;
+    if (v.readyState >= 2) {
+      setHasFrame(true);
+      return;
+    }
+    // requestAnimationFrame para esperar que el browser haya pintado el
+    // layout con el <video> visible antes de pedirle el seek.
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => {
+        try {
+          v.currentTime = 0.001;
+        } catch {
+          /* el listener canplay cubrirá si esto rebota */
+        }
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [videoLoaded]);
+
+  const onLoadedData = (e) => {
+    // readyState >= 2 (HAVE_CURRENT_DATA): el frame actual ya está decodificado
+    // y drawImage() puede pintarlo.
+    if (e.target.readyState >= 2) setHasFrame(true);
+  };
+
+  // Fallback: si por codec raro `loadeddata` no dispara, `canplay`
+  // (readyState>=3) sí — sin esto los botones quedan disabled para siempre.
+  const onCanPlay = (e) => {
+    if (e.target.readyState >= 2) setHasFrame(true);
   };
 
   const onTimeUpdate = (e) => {
     const t = e.target.currentTime;
     setCurrentTime(Number.isFinite(t) ? t : 0);
+    if (e.target.readyState >= 2) setHasFrame(true);
   };
 
-  const onSeeked = () => {
+  const onSeeked = (e) => {
+    if (e?.target?.readyState >= 2) setHasFrame(true);
     // Si hay una extracción de "todos los frames" esperando este seek,
     // la resolvemos.
     if (seekResolverRef.current) {
       const r = seekResolverRef.current;
       seekResolverRef.current = null;
       r();
+    }
+  };
+
+  // Si la duración era Infinity al loadedmetadata pero el browser termina
+  // calculándola después (típico de webm sin index), actualizamos el state
+  // para que el scrubber y "Extraer todos" funcionen.
+  const onDurationChange = (e) => {
+    const v = e.target;
+    if (Number.isFinite(v.duration) && v.duration > 0) {
+      setDuration(v.duration);
     }
   };
 
@@ -156,7 +234,10 @@ export default function VideoFrames({ onUseFrame }) {
   const togglePlay = () => {
     const v = videoElRef.current;
     if (!v || !videoLoaded) return;
-    if (v.paused) v.play();
+    // v.play() devuelve Promise: si el browser aborta (autoplay policy,
+    // seek concurrente, src cambiado), rechaza con AbortError/NotAllowedError.
+    // Sin .catch queda como uncaught promise rejection en consola.
+    if (v.paused) v.play().catch(() => {});
     else v.pause();
   };
 
@@ -185,12 +266,58 @@ export default function VideoFrames({ onUseFrame }) {
     // Sin dimensiones reales el toBlob saldría vacío y rompería al calibrador
     // con "No se pudo decodificar la imagen".
     if (!w || !h) return null;
+    // readyState < 2 = HAVE_CURRENT_DATA aún no listo: drawImage pintaría
+    // un canvas vacío (negro). Mejor abortar y dejar que el caller reintente.
+    if (v.readyState < 2) return null;
     cv.width = w;
     cv.height = h;
     const ctx = cv.getContext("2d");
-    ctx.drawImage(v, 0, 0, cv.width, cv.height);
+    // Safari puede lanzar InvalidStateError si readyState se degrada entre
+    // el chequeo de arriba y el drawImage (purge de buffer por seek
+    // concurrente). Devolver null en vez de propagar.
+    try {
+      ctx.drawImage(v, 0, 0, cv.width, cv.height);
+    } catch {
+      return null;
+    }
     return cv;
   }, [naturalSize]);
+
+  // Espera hasta que el <video> tenga un frame decodificado listo para pintar.
+  // Útil cuando el usuario aprieta "Extraer" antes de que cargue el primer
+  // frame, o justo después de cambiar de video.
+  const waitForFrame = useCallback(
+    (timeoutMs = 1500) =>
+      new Promise((resolve) => {
+        const v = videoElRef.current;
+        if (!v) return resolve(false);
+        if (v.readyState >= 2) return resolve(true);
+        let done = false;
+        const finish = (ok) => {
+          if (done) return;
+          done = true;
+          v.removeEventListener("loadeddata", onReady);
+          v.removeEventListener("seeked", onReady);
+          v.removeEventListener("canplay", onReady);
+          clearTimeout(to);
+          resolve(ok);
+        };
+        const onReady = () => {
+          if (v.readyState >= 2) finish(true);
+        };
+        v.addEventListener("loadeddata", onReady);
+        v.addEventListener("seeked", onReady);
+        v.addEventListener("canplay", onReady);
+        // Pequeño empujón: re-asignar currentTime obliga a decodificar.
+        try {
+          v.currentTime = v.currentTime || 0;
+        } catch {
+          /* ignore */
+        }
+        const to = setTimeout(() => finish(v.readyState >= 2), timeoutMs);
+      }),
+    []
+  );
 
   const blobFromCanvas = (cv, type = "image/png", quality) =>
     new Promise((resolve) => {
@@ -200,6 +327,12 @@ export default function VideoFrames({ onUseFrame }) {
   // ── Extraer el frame visible actual ──────────────────────
   const extractCurrentFrame = async () => {
     if (!videoLoaded) return;
+    // Si el usuario aprieta antes de que cargue el primer frame, esperar.
+    const ok = await waitForFrame();
+    if (!ok) {
+      setLoadError("El video aún no decodifica el primer frame. Reintenta.");
+      return;
+    }
     const cv = drawCurrentToCanvas();
     if (!cv) return;
     const blob = await blobFromCanvas(cv, "image/png");
@@ -216,6 +349,11 @@ export default function VideoFrames({ onUseFrame }) {
   // ── Mandar el frame actual al calibrador ─────────────────
   const sendCurrentToCalibrator = async () => {
     if (!videoLoaded || !onUseFrame) return;
+    const ok = await waitForFrame();
+    if (!ok) {
+      setLoadError("El video aún no decodifica el primer frame. Reintenta.");
+      return;
+    }
     const cv = drawCurrentToCanvas();
     if (!cv) return;
     const blob = await blobFromCanvas(cv, "image/png");
@@ -268,8 +406,14 @@ export default function VideoFrames({ onUseFrame }) {
           v.currentTime = t;
         });
         if (cancelExtractionRef.current) break;
+        // Doble guard: si el seek terminó pero readyState aún no llegó,
+        // esperar brevemente para no capturar un frame negro.
+        if (v.readyState < 2) {
+          const ok = await waitForFrame(800);
+          if (!ok) continue;
+        }
         const cv = drawCurrentToCanvas();
-        if (!cv) break;
+        if (!cv) continue;
         // JPEG en miniaturas para no explotar la memoria.
         const blob = await blobFromCanvas(cv, "image/jpeg", 0.85);
         if (cancelExtractionRef.current) break;
@@ -288,7 +432,9 @@ export default function VideoFrames({ onUseFrame }) {
       }
       extractingRef.current = false;
       setExtracting(false);
-      if (wasPlaying && !cancelExtractionRef.current) v.play();
+      if (wasPlaying && !cancelExtractionRef.current) {
+        v.play().catch(() => {});
+      }
     }
   };
 
@@ -347,23 +493,53 @@ export default function VideoFrames({ onUseFrame }) {
             <video
               ref={videoElRef}
               className="video-el"
-              preload="metadata"
+              // "auto" en lugar de "metadata": necesitamos al menos el primer
+              // frame decodificado para que drawImage() no devuelva negro.
+              preload="auto"
+              // muted permite que el navegador decodifique sin gesto de usuario
+              // (Safari/iOS lo exigen) y evita ruido si por error se reproduce.
+              muted
               playsInline
               onLoadedMetadata={onLoadedMetadata}
+              onLoadedData={onLoadedData}
+              onCanPlay={onCanPlay}
+              onDurationChange={onDurationChange}
               onTimeUpdate={onTimeUpdate}
               onSeeked={onSeeked}
               onError={onVideoError}
               onPlay={onPlay}
               onPause={onPause}
+              onEnded={() => setPlaying(false)}
             />
+
+            {/* Banner de error visible aunque ya haya un video cargado:
+                p.ej. "El video aún no decodifica el primer frame" o un
+                onError en medio de la extracción. */}
+            {videoLoaded && loadError && (
+              <div className="vf-error" role="alert">
+                {loadError}
+                <button
+                  className="vf-error-close"
+                  onClick={() => setLoadError("")}
+                  aria-label="Cerrar mensaje"
+                >
+                  ×
+                </button>
+              </div>
+            )}
 
             {videoLoaded && (
               <>
               {/* ── Barra de navegación del video ── */}
+              {/* Bloqueada durante extracción: si el usuario mueve el scrubber
+                  o usa los botones, el seek dispara onSeeked y resuelve el
+                  seekResolverRef con el frame equivocado → la galería queda
+                  con frames corruptos. */}
               <div className="navbar" aria-label="Barra de navegación del video">
                 <button
                   className="navbtn"
                   onClick={() => seekTo(0)}
+                  disabled={extracting}
                   title="Ir al inicio"
                   aria-label="Ir al inicio"
                 >
@@ -372,6 +548,7 @@ export default function VideoFrames({ onUseFrame }) {
                 <button
                   className="navbtn"
                   onClick={() => stepFrame(-1)}
+                  disabled={extracting}
                   title="Frame anterior"
                   aria-label="Frame anterior"
                 >
@@ -380,6 +557,7 @@ export default function VideoFrames({ onUseFrame }) {
                 <button
                   className="navbtn play"
                   onClick={togglePlay}
+                  disabled={extracting}
                   title={playing ? "Pausar" : "Reproducir"}
                   aria-label={playing ? "Pausar" : "Reproducir"}
                 >
@@ -388,6 +566,7 @@ export default function VideoFrames({ onUseFrame }) {
                 <button
                   className="navbtn"
                   onClick={() => stepFrame(1)}
+                  disabled={extracting}
                   title="Frame siguiente"
                   aria-label="Frame siguiente"
                 >
@@ -396,6 +575,7 @@ export default function VideoFrames({ onUseFrame }) {
                 <button
                   className="navbtn"
                   onClick={() => seekTo(duration)}
+                  disabled={extracting}
                   title="Ir al final"
                   aria-label="Ir al final"
                 >
@@ -410,6 +590,7 @@ export default function VideoFrames({ onUseFrame }) {
                     step={seekStep}
                     value={Math.min(currentTime, duration || 0)}
                     onChange={onScrub}
+                    disabled={extracting}
                     aria-label="Posición del video"
                   />
                   {/* Marcadores de frames extraídos */}
@@ -503,7 +684,10 @@ export default function VideoFrames({ onUseFrame }) {
           <input
             ref={fileInputRef}
             type="file"
-            accept="video/*"
+            // Listar extensiones además de "video/*": algunos sistemas/archivos
+            // descargados no exponen MIME, y "video/*" los ocultaría del
+            // file picker — solo se podrían cargar con drag-and-drop.
+            accept="video/*,.mp4,.webm,.mov,.m4v,.ogg,.ogv,.mkv,.avi"
             style={{ display: "none" }}
             onChange={(e) => loadFile(e.target.files[0])}
           />
@@ -548,14 +732,16 @@ export default function VideoFrames({ onUseFrame }) {
             </p>
             <button
               className="btn ghost"
-              disabled={!videoLoaded}
+              disabled={!videoLoaded || !hasFrame || extracting}
               onClick={extractCurrentFrame}
             >
-              Extraer este frame
+              {videoLoaded && !hasFrame
+                ? "Cargando frame…"
+                : "Extraer este frame"}
             </button>
             <button
               className="btn primary"
-              disabled={!videoLoaded}
+              disabled={!videoLoaded || !hasFrame || extracting}
               onClick={sendCurrentToCalibrator}
             >
               Calibrar con este frame
@@ -673,6 +859,32 @@ export default function VideoFrames({ onUseFrame }) {
           color: var(--text-dim);
           line-height: 1.7;
         }
+        .vf-error {
+          width: 100%;
+          padding: 10px 14px;
+          background: rgba(184, 60, 60, 0.12);
+          border: 1px solid var(--bad, #b83c3c);
+          border-radius: 6px;
+          color: var(--text);
+          font-size: 12px;
+          line-height: 1.5;
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .vf-error-close {
+          background: none;
+          border: none;
+          color: var(--text-dim);
+          font-size: 18px;
+          line-height: 1;
+          cursor: pointer;
+          padding: 0 4px;
+        }
+        .vf-error-close:hover {
+          color: var(--text);
+        }
         .dz-error {
           margin-top: 14px;
           font-size: 12px;
@@ -686,8 +898,17 @@ export default function VideoFrames({ onUseFrame }) {
           flex-direction: column;
           gap: 10px;
         }
+        /* Posicionamiento fuera de pantalla, no display:none. Mantiene el
+           video en el layout para que el browser no aplace la decodificación
+           del primer frame mientras está oculto. */
         .player-host.hidden {
-          display: none;
+          position: absolute;
+          left: -99999px;
+          top: 0;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          pointer-events: none;
         }
         .video-el {
           width: 100%;

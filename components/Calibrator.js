@@ -45,7 +45,18 @@ export default function Calibrator({
 
   // ── Carga de imagen ──────────────────────────────────────
   const loadFile = useCallback((file) => {
-    if (!file || !file.type.startsWith("image/")) {
+    if (!file) {
+      setLoadError("No se eligió archivo.");
+      return;
+    }
+    // Algunos navegadores/SO no rellenan file.type para PNG re-descargados
+    // (OneDrive, share targets, etc.). Aceptamos también por extensión —
+    // si el contenido no es imagen, img.onerror lo cazará abajo.
+    const isImageByType = file.type?.startsWith("image/");
+    const isImageByExt = /\.(png|jpe?g|webp|gif|bmp|avif)$/i.test(
+      file.name || ""
+    );
+    if (!isImageByType && !isImageByExt) {
       setLoadError("El archivo no es una imagen válida.");
       return;
     }
@@ -70,7 +81,21 @@ export default function Calibrator({
       URL.revokeObjectURL(url);
       if (objectUrlRef.current === url) objectUrlRef.current = null;
       if (!mountedRef.current) return;
-      setLoadError("No se pudo decodificar la imagen.");
+      // Si el archivo es chico (< 2MB), avisar que probablemente fue
+      // extraído cuando el video estaba en negro. Para 720p+ con contenido
+      // real una imagen suele pesar más que eso.
+      const fmtSize = (n) =>
+        n >= 1_000_000
+          ? (n / 1_000_000).toFixed(2) + " MB"
+          : (n / 1000).toFixed(1) + " KB";
+      setLoadError(
+        "No se pudo decodificar la imagen. " +
+          (file.size < 2_000_000
+            ? "El archivo pesa " +
+              fmtSize(file.size) +
+              " — probablemente fue extraído cuando el video estaba en negro. Re-extraé el frame desde Video/Frames."
+            : "El archivo podría estar corrupto.")
+      );
     };
     img.src = url;
     setImageName(file.name);
@@ -345,6 +370,20 @@ export default function Calibrator({
       <div className="layout">
         {/* ── Lienzo ── */}
         <main className="stage">
+          {/* Banner de error visible siempre (afuera del dropzone, que
+              con aspect-ratio:16/9 lo recortaba si el texto era largo). */}
+          {loadError && (
+            <div className="cal-error" role="alert">
+              <strong>Error:</strong> {loadError}
+              <button
+                className="cal-error-close"
+                onClick={() => setLoadError("")}
+                aria-label="Cerrar mensaje"
+              >
+                ×
+              </button>
+            </div>
+          )}
           {!imageLoaded ? (
             <div
               className="dropzone"
@@ -360,7 +399,6 @@ export default function Calibrator({
                   <br />
                   Extrae el frame con el Frame Extractor o cualquier captura.
                 </div>
-                {loadError && <div className="dz-error">{loadError}</div>}
               </div>
             </div>
           ) : (
@@ -406,7 +444,10 @@ export default function Calibrator({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            // Extensiones explícitas además de "image/*": PNG re-descargados
+            // (OneDrive, share targets) llegan con file.type vacío y serían
+            // ocultados del picker con solo "image/*".
+            accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.avif"
             style={{ display: "none" }}
             onChange={(e) => loadFile(e.target.files[0])}
           />
@@ -606,10 +647,43 @@ export default function Calibrator({
         .stage {
           padding: 24px;
           display: flex;
+          flex-direction: column;
           align-items: center;
           justify-content: center;
           background: var(--bg);
           overflow: auto;
+          gap: 14px;
+        }
+        .cal-error {
+          width: 100%;
+          max-width: 640px;
+          padding: 10px 14px;
+          background: rgba(184, 60, 60, 0.12);
+          border: 1px solid var(--bad, #b83c3c);
+          border-radius: 6px;
+          color: var(--text);
+          font-size: 12px;
+          line-height: 1.5;
+          display: flex;
+          align-items: flex-start;
+          justify-content: space-between;
+          gap: 12px;
+        }
+        .cal-error strong {
+          color: var(--bad, #b83c3c);
+        }
+        .cal-error-close {
+          background: none;
+          border: none;
+          color: var(--text-dim);
+          font-size: 18px;
+          line-height: 1;
+          cursor: pointer;
+          padding: 0 4px;
+          flex-shrink: 0;
+        }
+        .cal-error-close:hover {
+          color: var(--text);
         }
         .dropzone {
           width: 100%;

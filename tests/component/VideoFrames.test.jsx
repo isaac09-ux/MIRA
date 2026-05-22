@@ -38,6 +38,23 @@ function fireLoadedMetadata(container, { duration = 10, w = 1280, h = 720 } = {}
   return video;
 }
 
+// Simula que el navegador ya decodificó el primer frame (readyState=2).
+// Sin esto los botones de captura quedan deshabilitados — drawImage daría negro.
+function fireLoadedData(container) {
+  const video = container.querySelector("video");
+  Object.defineProperty(video, "readyState", { value: 2, configurable: true });
+  fireEvent(video, new Event("loadeddata"));
+  return video;
+}
+
+// Fallback: si loadeddata no dispara (codecs raros), canplay sí.
+function fireCanPlay(container) {
+  const video = container.querySelector("video");
+  Object.defineProperty(video, "readyState", { value: 3, configurable: true });
+  fireEvent(video, new Event("canplay"));
+  return video;
+}
+
 describe("VideoFrames — estado inicial", () => {
   test("renderiza el dropzone con instrucciones", () => {
     render(<VideoFrames />);
@@ -92,6 +109,7 @@ describe("VideoFrames — carga de archivos", () => {
       target: { files: [new File(["fake"], "v.mp4", { type: "video/mp4" })] },
     });
     fireLoadedMetadata(container, { duration: 10, w: 1280, h: 720 });
+    fireLoadedData(container);
 
     // El <video> debe ser EL MISMO nodo del DOM (no se remontó).
     const videoAfter = container.querySelector("video");
@@ -106,6 +124,131 @@ describe("VideoFrames — carga de archivos", () => {
     ).not.toBeDisabled();
     expect(
       screen.getByRole("button", { name: /Extraer todos/i })
+    ).not.toBeDisabled();
+  });
+
+  test("acepta video por extensión cuando file.type viene vacío", () => {
+    // Algunos sistemas (descargas, share targets) entregan File con type="".
+    const { container } = render(<VideoFrames />);
+    const input = container.querySelector('input[type="file"]');
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "v.mp4", { type: "" })] },
+    });
+    // No debe mostrar el error de archivo inválido.
+    expect(
+      screen.queryByText(/El archivo no es un video válido/i)
+    ).not.toBeInTheDocument();
+    // Y sí debe haber creado la object URL para el blob.
+    expect(createdUrls).toHaveLength(1);
+  });
+
+  test("rechaza archivo sin pista de video (videoWidth=0) con error claro", () => {
+    // Bug A4 del auditor: mp4 solo-audio o .m4a renombrado → drawImage daría
+    // un canvas vacío silenciosamente.
+    const { container } = render(<VideoFrames />);
+    fireEvent.change(container.querySelector('input[type="file"]'), {
+      target: { files: [new File(["x"], "audio.mp4", { type: "video/mp4" })] },
+    });
+    fireLoadedMetadata(container, { duration: 30, w: 0, h: 0 });
+    // Debe mostrar el error y NO marcar videoLoaded.
+    expect(
+      screen.getByText(/El archivo no tiene pista de video/i)
+    ).toBeInTheDocument();
+    // Sin videoLoaded → vuelve al dropzone.
+    expect(screen.getByText(/Ningún video cargado/i)).toBeInTheDocument();
+  });
+
+  test("canplay actúa como fallback de loadeddata para hasFrame", () => {
+    // Bug A1: en algunos codecs/browsers loadeddata no dispara, pero canplay sí.
+    // Sin este fallback los botones quedan disabled para siempre.
+    const { container } = render(<VideoFrames />);
+    fireEvent.change(container.querySelector('input[type="file"]'), {
+      target: { files: [new File(["x"], "v.mp4", { type: "video/mp4" })] },
+    });
+    fireLoadedMetadata(container, { duration: 10, w: 640, h: 480 });
+    // Sin loadeddata el botón sigue disabled
+    expect(
+      screen.getByRole("button", { name: /Cargando frame/i })
+    ).toBeDisabled();
+    // Pero canplay también debe habilitar
+    fireCanPlay(container);
+    expect(
+      screen.getByRole("button", { name: /Extraer este frame/i })
+    ).not.toBeDisabled();
+  });
+
+  test("loadError es visible aún cuando videoLoaded=true (no oculto)", () => {
+    // Bug C1: antes el banner de error solo se renderizaba en el bloque
+    // !videoLoaded — el usuario nunca veía mensajes una vez cargado el video.
+    const { container } = render(<VideoFrames />);
+    // Cargar un video válido
+    fireEvent.change(container.querySelector('input[type="file"]'), {
+      target: { files: [new File(["x"], "v.mp4", { type: "video/mp4" })] },
+    });
+    fireLoadedMetadata(container, { duration: 10, w: 320, h: 240 });
+    fireLoadedData(container);
+    // Ahora intentar cargar un archivo inválido (mientras hay video cargado)
+    fireEvent.change(container.querySelector('input[type="file"]'), {
+      target: { files: [new File(["x"], "doc.txt", { type: "text/plain" })] },
+    });
+    // El error DEBE ser visible aunque videoLoaded siga true (no se resetea
+    // para un archivo inválido).
+    expect(
+      screen.getByText(/El archivo no es un video válido/i)
+    ).toBeInTheDocument();
+  });
+
+  test("onDurationChange actualiza duration si pasa de Infinity a finita", () => {
+    // Bug relacionado: webm sin index reporta duration=Infinity en
+    // loadedmetadata y la actualiza después con durationchange.
+    const { container } = render(<VideoFrames />);
+    fireEvent.change(container.querySelector('input[type="file"]'), {
+      target: { files: [new File(["x"], "v.webm", { type: "video/webm" })] },
+    });
+    fireLoadedMetadata(container, { duration: Infinity, w: 640, h: 480 });
+    fireLoadedData(container);
+    // Inicialmente duration=0 (Infinity se trunca)
+    expect(
+      screen.getByText(/El video aún no reporta su duración/i)
+    ).toBeInTheDocument();
+    // Disparar durationchange con valor finito
+    const video = container.querySelector("video");
+    Object.defineProperty(video, "duration", {
+      value: 42.5,
+      configurable: true,
+    });
+    fireEvent(video, new Event("durationchange"));
+    // Ahora el botón "Extraer todos" debe quedar habilitado
+    expect(
+      screen.getByRole("button", { name: /Extraer todos/i })
+    ).not.toBeDisabled();
+  });
+
+  test("los botones quedan deshabilitados hasta que loadeddata pinte el primer frame", () => {
+    // Regresión: con preload="metadata", el <video> no decodifica nada y
+    // drawImage capturaba un canvas negro. Ahora "Extraer este frame" y
+    // "Calibrar con este frame" exigen hasFrame=true.
+    const { container } = render(<VideoFrames />);
+    fireEvent.change(container.querySelector('input[type="file"]'), {
+      target: { files: [new File(["x"], "v.mp4", { type: "video/mp4" })] },
+    });
+    fireLoadedMetadata(container, { duration: 10, w: 320, h: 240 });
+
+    // Sin loadeddata, los botones de captura siguen deshabilitados.
+    expect(
+      screen.getByRole("button", { name: /Cargando frame/i })
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Calibrar con este frame/i })
+    ).toBeDisabled();
+
+    fireLoadedData(container);
+
+    expect(
+      screen.getByRole("button", { name: /Extraer este frame/i })
+    ).not.toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: /Calibrar con este frame/i })
     ).not.toBeDisabled();
   });
 });
