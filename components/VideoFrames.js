@@ -135,8 +135,13 @@ export default function VideoFrames({ onUseFrame }) {
     const v = videoElRef.current;
     const cv = canvasRef.current;
     if (!v || !cv) return null;
-    cv.width = v.videoWidth || naturalSize[0];
-    cv.height = v.videoHeight || naturalSize[1];
+    const w = v.videoWidth || naturalSize[0];
+    const h = v.videoHeight || naturalSize[1];
+    // Sin dimensiones reales el toBlob saldría vacío y rompería al calibrador
+    // con "No se pudo decodificar la imagen".
+    if (!w || !h) return null;
+    cv.width = w;
+    cv.height = h;
     const ctx = cv.getContext("2d");
     ctx.drawImage(v, 0, 0, cv.width, cv.height);
     return cv;
@@ -266,53 +271,26 @@ export default function VideoFrames({ onUseFrame }) {
       <div className="layout">
         {/* ── Stage ── */}
         <main className="stage">
-          {!videoLoaded ? (
-            <div
-              className="dropzone"
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={onDrop}
-              onClick={() => fileInputRef.current?.click()}
-            >
-              <div className="dz-inner">
-                <div className="dz-icon">[ ▶ ]</div>
-                <div className="dz-title">Carga un video</div>
-                <div className="dz-hint">
-                  Arrastra un .mp4 / .webm / .mov aquí, o haz clic para elegir.
-                  <br />
-                  Puedes navegar y extraer un frame puntual o todos a intervalos.
-                </div>
-                {loadError && <div className="dz-error">{loadError}</div>}
-              </div>
-              {/* El <video> queda montado pero oculto antes de cargar para que
-                  el src se pueda asignar sin remount. */}
-              <video
-                ref={videoElRef}
-                style={{ display: "none" }}
-                preload="metadata"
-                playsInline
-                onLoadedMetadata={onLoadedMetadata}
-                onTimeUpdate={onTimeUpdate}
-                onSeeked={onSeeked}
-                onError={onVideoError}
-                onPlay={onPlay}
-                onPause={onPause}
-              />
-            </div>
-          ) : (
-            <div className="player-host">
-              <video
-                ref={videoElRef}
-                className="video-el"
-                preload="metadata"
-                playsInline
-                onLoadedMetadata={onLoadedMetadata}
-                onTimeUpdate={onTimeUpdate}
-                onSeeked={onSeeked}
-                onError={onVideoError}
-                onPlay={onPlay}
-                onPause={onPause}
-              />
+          {/* El <video> se mantiene siempre montado para que videoElRef no
+              cambie entre el estado vacío y el cargado. Si lo desmontamos al
+              alternar `videoLoaded`, perdemos el src asignado y el reproductor
+              se queda en negro. */}
+          <div className={"player-host" + (videoLoaded ? "" : " hidden")}>
+            <video
+              ref={videoElRef}
+              className="video-el"
+              preload="metadata"
+              playsInline
+              onLoadedMetadata={onLoadedMetadata}
+              onTimeUpdate={onTimeUpdate}
+              onSeeked={onSeeked}
+              onError={onVideoError}
+              onPlay={onPlay}
+              onPause={onPause}
+            />
 
+            {videoLoaded && (
+              <>
               {/* ── Barra de navegación del video ── */}
               <div className="navbar" aria-label="Barra de navegación del video">
                 <button
@@ -430,6 +408,27 @@ export default function VideoFrames({ onUseFrame }) {
                   </div>
                 </div>
               )}
+              </>
+            )}
+          </div>
+
+          {!videoLoaded && (
+            <div
+              className="dropzone"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={onDrop}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <div className="dz-inner">
+                <div className="dz-icon">[ ▶ ]</div>
+                <div className="dz-title">Carga un video</div>
+                <div className="dz-hint">
+                  Arrastra un .mp4 / .webm / .mov aquí, o haz clic para elegir.
+                  <br />
+                  Puedes navegar y extraer un frame puntual o todos a intervalos.
+                </div>
+                {loadError && <div className="dz-error">{loadError}</div>}
+              </div>
             </div>
           )}
 
@@ -612,6 +611,9 @@ export default function VideoFrames({ onUseFrame }) {
           display: flex;
           flex-direction: column;
           gap: 10px;
+        }
+        .player-host.hidden {
+          display: none;
         }
         .video-el {
           width: 100%;
