@@ -138,16 +138,40 @@ export default function VideoFrames({ onUseFrame }) {
     setNaturalSize([v.videoWidth, v.videoHeight]);
     setVideoLoaded(true);
     setCurrentTime(0);
-    setHasFrame(false);
-    // Forzar la decodificación del primer frame. OJO: asignar currentTime al
-    // mismo valor que ya tiene es no-op en Chrome/Firefox — por eso 0.001
-    // y no 0. Sin esto el <video> se queda en HAVE_METADATA (negro).
-    try {
-      v.currentTime = 0.001;
-    } catch {
-      /* algunos navegadores aún no aceptan el seek aquí; canplay cubrirá */
-    }
+    // Si preload="auto" ya alcanzó readyState>=2, el primer frame está
+    // listo — habilitar los botones inmediatamente.
+    setHasFrame(v.readyState >= 2);
+    // NOTA: el micro-seek para forzar la decodificación del primer frame
+    // NO se hace aquí. Se hace en un useEffect después de que React
+    // rerenderice y el <video> deje de estar oculto (ver más abajo).
+    // Sin esa demora, Edge/Chrome ignoran el seek sobre el elemento oculto
+    // y `loadeddata` nunca dispara → botones disabled para siempre.
   };
+
+  // Una vez que videoLoaded=true y el <video> ya está VISIBLE en el DOM,
+  // forzar el seek a 0.001 para que el browser decodifique el primer frame.
+  // OJO: currentTime=0 es no-op si ya está en 0 — por eso 0.001.
+  useEffect(() => {
+    if (!videoLoaded) return;
+    const v = videoElRef.current;
+    if (!v) return;
+    if (v.readyState >= 2) {
+      setHasFrame(true);
+      return;
+    }
+    // requestAnimationFrame para esperar que el browser haya pintado el
+    // layout con el <video> visible antes de pedirle el seek.
+    let raf = requestAnimationFrame(() => {
+      raf = requestAnimationFrame(() => {
+        try {
+          v.currentTime = 0.001;
+        } catch {
+          /* el listener canplay cubrirá si esto rebota */
+        }
+      });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [videoLoaded]);
 
   const onLoadedData = (e) => {
     // readyState >= 2 (HAVE_CURRENT_DATA): el frame actual ya está decodificado
@@ -874,8 +898,17 @@ export default function VideoFrames({ onUseFrame }) {
           flex-direction: column;
           gap: 10px;
         }
+        /* Posicionamiento fuera de pantalla, no display:none. Mantiene el
+           video en el layout para que el browser no aplace la decodificación
+           del primer frame mientras está oculto. */
         .player-host.hidden {
-          display: none;
+          position: absolute;
+          left: -99999px;
+          top: 0;
+          width: 1px;
+          height: 1px;
+          overflow: hidden;
+          pointer-events: none;
         }
         .video-el {
           width: 100%;
