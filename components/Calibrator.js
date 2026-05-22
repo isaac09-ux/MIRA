@@ -417,7 +417,10 @@ export default function Calibrator({
           <input
             ref={fileInputRef}
             type="file"
-            accept="image/*"
+            // Extensiones explícitas además de "image/*": PNG re-descargados
+            // (OneDrive, share targets) llegan con file.type vacío y serían
+            // ocultados del picker con solo "image/*".
+            accept="image/*,.png,.jpg,.jpeg,.webp,.gif,.bmp,.avif"
             style={{ display: "none" }}
             onChange={(e) => loadFile(e.target.files[0])}
           />
