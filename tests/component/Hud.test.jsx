@@ -54,4 +54,28 @@ describe("Hud — barra de navegación y pestañas", () => {
     expect(vidBtn).toHaveAttribute("aria-current", "page");
     expect(calBtn).not.toHaveAttribute("aria-current");
   });
+
+  test("el <video> de Video/Frames está siempre montado: no se remonta al cargar", () => {
+    // Regresión del bug raíz: dos <video> en branches distintos del JSX
+    // hacían que el src se perdiera al pasar de !videoLoaded → videoLoaded,
+    // dejando el reproductor en negro y rompiendo "Calibrar con este frame".
+    const { container } = render(<Hud />);
+    fireEvent.click(screen.getByRole("button", { name: "Video / Frames" }));
+    const videoBefore = container.querySelector("video");
+    expect(videoBefore).not.toBeNull();
+
+    // Simular que llega un archivo al input
+    const input = container.querySelector('input[type="file"]');
+    fireEvent.change(input, {
+      target: { files: [new File(["x"], "v.mp4", { type: "video/mp4" })] },
+    });
+    // Disparar loadedmetadata sobre ese mismo <video>
+    Object.defineProperty(videoBefore, "duration", { value: 5, configurable: true });
+    Object.defineProperty(videoBefore, "videoWidth", { value: 640, configurable: true });
+    Object.defineProperty(videoBefore, "videoHeight", { value: 480, configurable: true });
+    fireEvent(videoBefore, new Event("loadedmetadata"));
+
+    const videoAfter = container.querySelector("video");
+    expect(videoAfter).toBe(videoBefore);
+  });
 });

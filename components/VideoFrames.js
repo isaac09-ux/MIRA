@@ -15,6 +15,12 @@ export default function VideoFrames({ onUseFrame }) {
   const fileInputRef = useRef(null);
   const objectUrlRef = useRef(null);
   const seekResolverRef = useRef(null);
+  // Refs paralelos al state para que el cleanup al unmount y los chequeos
+  // sincrónicos (anti doble-click, cancelación) tengan el valor *actual*
+  // sin depender de la closure del render.
+  const extractedRef = useRef([]);
+  const extractingRef = useRef(false);
+  const cancelExtractionRef = useRef(false);
 
   const [videoName, setVideoName] = useState("");
   const [videoLoaded, setVideoLoaded] = useState(false);
@@ -34,13 +40,27 @@ export default function VideoFrames({ onUseFrame }) {
     list.forEach((f) => f.url && URL.revokeObjectURL(f.url));
   }, []);
 
+  // Mantener `extractedRef` sincronizado para que el cleanup pueda revocar
+  // las URLs vigentes al momento del unmount (no las de [] del primer render).
+  useEffect(() => {
+    extractedRef.current = extracted;
+  }, [extracted]);
+
+  // Cleanup al unmount: revocar URLs vivas y cancelar cualquier extracción
+  // en curso para que el for-loop no haga setState sobre un componente muerto.
   useEffect(() => {
     return () => {
+      cancelExtractionRef.current = true;
+      // Resolver cualquier seek pendiente para que el await no quede colgado.
+      if (seekResolverRef.current) {
+        const r = seekResolverRef.current;
+        seekResolverRef.current = null;
+        r();
+      }
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-      revokeExtracted(extracted);
+      revokeExtracted(extractedRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [revokeExtracted]);
 
   // ── Carga de archivo ──────────────────────────────────────
   const loadFile = useCallback(
@@ -50,8 +70,17 @@ export default function VideoFrames({ onUseFrame }) {
         return;
       }
       setLoadError("");
+      // Cancelar extracción en curso (si la hubiera) antes de pisar el video.
+      cancelExtractionRef.current = true;
+      if (seekResolverRef.current) {
+        const r = seekResolverRef.current;
+        seekResolverRef.current = null;
+        r();
+      }
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
-      revokeExtracted(extracted);
+      // Revocar lo extraído vía ref (no captura stale) y limpiar.
+      revokeExtracted(extractedRef.current);
+      extractedRef.current = [];
       const url = URL.createObjectURL(file);
       objectUrlRef.current = url;
       setVideoName(file.name);
@@ -59,6 +88,7 @@ export default function VideoFrames({ onUseFrame }) {
       setExtractProgress(0);
       setVideoLoaded(false);
       setDuration(0);
+      setNaturalSize([0, 0]);
       setCurrentTime(0);
       setPlaying(false);
       // El <video> ya está montado; solo cambiamos src.
@@ -68,7 +98,7 @@ export default function VideoFrames({ onUseFrame }) {
         videoElRef.current.load();
       }
     },
-    [extracted, revokeExtracted]
+    [revokeExtracted]
   );
 
   const onDrop = (e) => {
@@ -79,14 +109,19 @@ export default function VideoFrames({ onUseFrame }) {
   // ── Eventos del <video> ───────────────────────────────────
   const onLoadedMetadata = (e) => {
     const v = e.target;
-    setDuration(v.duration || 0);
+    // Algunos webm/mp4 reportan duration=Infinity hasta haberse reproducido.
+    // Si no es finita, dejamos 0: el scrubber y el cálculo de "todos los
+    // frames" lo tratan como desconocido en vez de propagar NaN.
+    const d = Number.isFinite(v.duration) ? v.duration : 0;
+    setDuration(d);
     setNaturalSize([v.videoWidth, v.videoHeight]);
     setVideoLoaded(true);
     setCurrentTime(0);
   };
 
   const onTimeUpdate = (e) => {
-    setCurrentTime(e.target.currentTime);
+    const t = e.target.currentTime;
+    setCurrentTime(Number.isFinite(t) ? t : 0);
   };
 
   const onSeeked = () => {
@@ -102,6 +137,16 @@ export default function VideoFrames({ onUseFrame }) {
   const onVideoError = () => {
     setLoadError("No se pudo decodificar el video.");
     setVideoLoaded(false);
+    setDuration(0);
+    setCurrentTime(0);
+    setNaturalSize([0, 0]);
+    // Si reventó en medio de una extracción, destrabar el await.
+    if (seekResolverRef.current) {
+      const r = seekResolverRef.current;
+      seekResolverRef.current = null;
+      r();
+    }
+    cancelExtractionRef.current = true;
   };
 
   const onPlay = () => setPlaying(true);
@@ -160,10 +205,12 @@ export default function VideoFrames({ onUseFrame }) {
     const blob = await blobFromCanvas(cv, "image/png");
     if (!blob) return;
     const url = URL.createObjectURL(blob);
-    setExtracted((prev) => [
-      ...prev,
-      { time: videoElRef.current.currentTime, url },
-    ]);
+    const entry = { time: videoElRef.current.currentTime, url };
+    setExtracted((prev) => {
+      const next = [...prev, entry];
+      extractedRef.current = next;
+      return next;
+    });
   };
 
   // ── Mandar el frame actual al calibrador ─────────────────
@@ -183,18 +230,27 @@ export default function VideoFrames({ onUseFrame }) {
 
   // ── Extraer frames a intervalos regulares ────────────────
   const extractAllFrames = async () => {
-    if (!videoLoaded || extracting) return;
+    // Guard sincrónico: bloquea doble-click antes de que setExtracting(true)
+    // se aplique. Sin esto, dos clicks en el mismo tick entran ambos.
+    if (!videoLoaded || extractingRef.current) return;
     const v = videoElRef.current;
     if (!v) return;
+    // Sin duración finita no podemos planear el muestreo. El aviso ya está
+    // visible en el panel (ver render), así que aquí sólo abortamos.
+    if (!Number.isFinite(duration) || duration <= 0) return;
     const step = Math.max(MIN_INTERVAL, Number(intervalSec) || MIN_INTERVAL);
     let count = Math.floor(duration / step) + 1;
     if (count > SAFE_MAX_FRAMES) count = SAFE_MAX_FRAMES;
     if (count <= 0) return;
 
+    extractingRef.current = true;
+    cancelExtractionRef.current = false;
     setExtracting(true);
     setExtractProgress(0);
-    // Limpiar lo previo para no dejar URLs colgadas.
-    revokeExtracted(extracted);
+    // Limpiar lo previo (vía ref para no usar closure stale).
+    revokeExtracted(extractedRef.current);
+    extractedRef.current = [];
+    setExtracted([]);
     const out = [];
 
     const wasPlaying = !v.paused;
@@ -202,26 +258,37 @@ export default function VideoFrames({ onUseFrame }) {
 
     try {
       for (let i = 0; i < count; i++) {
+        if (cancelExtractionRef.current) break;
         const t = Math.min(i * step, duration);
         // Esperar al evento seeked antes de pintar — si no, drawImage
-        // saca el frame anterior.
+        // saca el frame anterior. El resolver también se llama desde
+        // onVideoError y desde el unmount para no quedar colgado.
         await new Promise((resolve) => {
           seekResolverRef.current = resolve;
           v.currentTime = t;
         });
+        if (cancelExtractionRef.current) break;
         const cv = drawCurrentToCanvas();
         if (!cv) break;
         // JPEG en miniaturas para no explotar la memoria.
         const blob = await blobFromCanvas(cv, "image/jpeg", 0.85);
+        if (cancelExtractionRef.current) break;
         if (!blob) continue;
         out.push({ time: t, url: URL.createObjectURL(blob) });
         setExtractProgress(Math.round(((i + 1) / count) * 100));
       }
     } finally {
       seekResolverRef.current = null;
-      setExtracted(out);
+      if (cancelExtractionRef.current) {
+        // Si nos cancelaron (unmount o nuevo loadFile), descartar lo extraído.
+        revokeExtracted(out);
+      } else {
+        extractedRef.current = out;
+        setExtracted(out);
+      }
+      extractingRef.current = false;
       setExtracting(false);
-      if (wasPlaying) v.play();
+      if (wasPlaying && !cancelExtractionRef.current) v.play();
     }
   };
 
@@ -251,7 +318,8 @@ export default function VideoFrames({ onUseFrame }) {
   };
 
   const clearExtracted = () => {
-    revokeExtracted(extracted);
+    revokeExtracted(extractedRef.current);
+    extractedRef.current = [];
     setExtracted([]);
     setExtractProgress(0);
   };
@@ -521,9 +589,15 @@ export default function VideoFrames({ onUseFrame }) {
                 frames a este intervalo
               </p>
             )}
+            {videoLoaded && duration <= 0 && (
+              <p className="warn-msg" role="status">
+                El video aún no reporta su duración. Reprodúcelo un instante y
+                vuelve a intentar.
+              </p>
+            )}
             <button
               className="btn ghost"
-              disabled={!videoLoaded || extracting}
+              disabled={!videoLoaded || extracting || duration <= 0}
               onClick={extractAllFrames}
             >
               {extracting
@@ -782,6 +856,16 @@ export default function VideoFrames({ onUseFrame }) {
         .tiny {
           font-size: 11px;
           margin-top: 8px;
+        }
+        .warn-msg {
+          font-size: 11px;
+          line-height: 1.5;
+          color: var(--warn);
+          margin-top: 8px;
+          padding: 8px 10px;
+          background: var(--surface);
+          border-left: 2px solid var(--warn);
+          border-radius: 4px;
         }
         code {
           font-family: var(--mono);
