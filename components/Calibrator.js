@@ -106,6 +106,7 @@ export default function Calibrator({
 
   // Liberar la URL del blob al desmontar el componente
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
       if (objectUrlRef.current) URL.revokeObjectURL(objectUrlRef.current);
