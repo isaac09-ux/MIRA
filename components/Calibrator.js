@@ -12,9 +12,13 @@ import {
 
 // Radio de captura para arrastrar una esquina (en px naturales de imagen)
 const GRAB_RADIUS = 26;
-// Zoom de la lupa
-const LOUPE_ZOOM = 6;
-const LOUPE_SIZE = 150;
+// Lupa: tamaño chico y fijo en una esquina; el zoom es ajustable en runtime.
+const LOUPE_SIZE = 128;
+const LOUPE_MIN_ZOOM = 2;
+const LOUPE_MAX_ZOOM = 16;
+const LOUPE_DEFAULT_ZOOM = 6;
+const clampZoom = (z) =>
+  Math.max(LOUPE_MIN_ZOOM, Math.min(LOUPE_MAX_ZOOM, Math.round(z)));
 
 export default function Calibrator({
   embedded = false,
@@ -32,6 +36,9 @@ export default function Calibrator({
   const [imageLoaded, setImageLoaded] = useState(false);
   const [corners, setCorners] = useState([]); // {x,y} en coords naturales
   const [dragIndex, setDragIndex] = useState(-1);
+  // Esquina "enfocada" para ajuste fino con flechas (independiente del drag).
+  const [selectedIndex, setSelectedIndex] = useState(-1);
+  const [loupeZoom, setLoupeZoom] = useState(LOUPE_DEFAULT_ZOOM);
   const [halfCourt, setHalfCourt] = useState(false);
   const [ppm, setPpm] = useState(40);
   const [videoRef, setVideoRef] = useState("video.mp4");
@@ -76,6 +83,7 @@ export default function Calibrator({
       setImageLoaded(true);
       setCorners([]);
       setDragIndex(-1);
+      setSelectedIndex(-1);
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
@@ -145,25 +153,36 @@ export default function Calibrator({
   const onCanvasDown = (e) => {
     if (!imageLoaded) return;
     const p = toNatural(e.clientX, e.clientY);
-    // ¿Tocó una esquina existente? → arrastrar
+    // ¿Tocó una esquina existente? → arrastrar (y enfocarla para las flechas)
     for (let i = 0; i < corners.length; i++) {
       const dx = corners[i].x - p.x;
       const dy = corners[i].y - p.y;
       if (Math.hypot(dx, dy) < GRAB_RADIUS) {
         setDragIndex(i);
+        setSelectedIndex(i);
         return;
       }
     }
-    // Si faltan esquinas, colocar la siguiente
+    // Si faltan esquinas, colocar la siguiente y dejarla enfocada
     if (corners.length < 4) {
+      setSelectedIndex(corners.length);
       setCorners([...corners, { x: p.x, y: p.y }]);
     }
   };
 
   const onCanvasMove = (e) => {
     if (!imageLoaded) return;
-    const p = toNatural(e.clientX, e.clientY);
-    setCursor({ x: p.x, y: p.y, clientX: e.clientX, clientY: e.clientY });
+    const cv = canvasRef.current;
+    const rect = cv.getBoundingClientRect();
+    const p = {
+      x: ((e.clientX - rect.left) * cv.width) / rect.width,
+      y: ((e.clientY - rect.top) * cv.height) / rect.height,
+    };
+    // Fracción 0..1 dentro del lienzo: ubica la lupa en la esquina opuesta
+    // al cursor para que no tape el punto que estás marcando.
+    const fx = (e.clientX - rect.left) / rect.width;
+    const fy = (e.clientY - rect.top) / rect.height;
+    setCursor({ x: p.x, y: p.y, clientX: e.clientX, clientY: e.clientY, fx, fy });
     // Guard de bounds: si las esquinas se resetearon mientras arrastrábamos
     // (por ejemplo al cargar un frame nuevo desde el extractor de video),
     // dragIndex puede haber quedado apuntando fuera del array. Sin esto
@@ -193,6 +212,61 @@ export default function Calibrator({
     window.addEventListener("mouseup", up);
     return () => window.removeEventListener("mouseup", up);
   }, [dragIndex]);
+
+  // Teclado: flechas mueven la esquina enfocada 1 px (Shift = 10 px) para
+  // ajuste fino sin pelear con el mouse; + / − ajustan el zoom de la lupa.
+  useEffect(() => {
+    if (!imageLoaded) return;
+    const onKey = (e) => {
+      const tag = e.target?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (e.key === "+" || e.key === "=") {
+        e.preventDefault();
+        setLoupeZoom((z) => clampZoom(z + 1));
+        return;
+      }
+      if (e.key === "-" || e.key === "_") {
+        e.preventDefault();
+        setLoupeZoom((z) => clampZoom(z - 1));
+        return;
+      }
+      if (selectedIndex < 0) return;
+      const step = e.shiftKey ? 10 : 1;
+      let dx = 0;
+      let dy = 0;
+      if (e.key === "ArrowLeft") dx = -step;
+      else if (e.key === "ArrowRight") dx = step;
+      else if (e.key === "ArrowUp") dy = -step;
+      else if (e.key === "ArrowDown") dy = step;
+      else return;
+      e.preventDefault();
+      setCorners((prev) => {
+        if (selectedIndex >= prev.length) return prev;
+        const next = [...prev];
+        const c = next[selectedIndex];
+        next[selectedIndex] = {
+          x: Math.max(0, Math.min(naturalSize[0], c.x + dx)),
+          y: Math.max(0, Math.min(naturalSize[1], c.y + dy)),
+        };
+        return next;
+      });
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [imageLoaded, selectedIndex, naturalSize]);
+
+  // Rueda del mouse sobre el lienzo: acerca/aleja la lupa. Listener nativo
+  // no-pasivo para poder cancelar el scroll de la página.
+  useEffect(() => {
+    const cv = canvasRef.current;
+    if (!cv || !imageLoaded) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      setLoupeZoom((z) => clampZoom(z + (e.deltaY < 0 ? 1 : -1)));
+    };
+    cv.addEventListener("wheel", onWheel, { passive: false });
+    return () => cv.removeEventListener("wheel", onWheel);
+  }, [imageLoaded]);
 
   // ── Render del canvas principal ──────────────────────────
   useEffect(() => {
@@ -279,7 +353,19 @@ export default function Calibrator({
       ctx.strokeText(label, c.x + 11 * S, c.y - 9 * S);
       ctx.fillText(label, c.x + 11 * S, c.y - 9 * S);
     });
-  }, [imageLoaded, corners, halfCourt, ppm]);
+
+    // Anillo punteado sobre la esquina enfocada: indica cuál mueven las flechas.
+    if (selectedIndex >= 0 && selectedIndex < corners.length) {
+      const sc = corners[selectedIndex];
+      ctx.beginPath();
+      ctx.arc(sc.x, sc.y, 13 * S, 0, Math.PI * 2);
+      ctx.setLineDash([4 * S, 3 * S]);
+      ctx.lineWidth = 2 * S;
+      ctx.strokeStyle = "#5fd0d8";
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }, [imageLoaded, corners, halfCourt, ppm, selectedIndex]);
 
   // ── Render de la lupa ────────────────────────────────────
   // Nota: durante el arrastre mantenemos la lupa visible — sigue siendo útil
@@ -291,7 +377,7 @@ export default function Calibrator({
     ctx.clearRect(0, 0, LOUPE_SIZE, LOUPE_SIZE);
     if (!cursor || !imageLoaded) return;
     const img = imgRef.current;
-    const src = LOUPE_SIZE / LOUPE_ZOOM;
+    const src = LOUPE_SIZE / loupeZoom;
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(
       img,
@@ -304,16 +390,50 @@ export default function Calibrator({
       LOUPE_SIZE,
       LOUPE_SIZE
     );
-    // Cruz
-    ctx.strokeStyle = "#5fd0d8";
+
+    const c = LOUPE_SIZE / 2;
+
+    // Recuadro del píxel exacto bajo la mira (el que se guardará al hacer clic),
+    // alineado a la grilla real de píxeles de la imagen.
+    const fracX = cursor.x - Math.floor(cursor.x);
+    const fracY = cursor.y - Math.floor(cursor.y);
+    ctx.strokeStyle = "rgba(95,208,216,0.9)";
     ctx.lineWidth = 1;
+    ctx.strokeRect(
+      Math.round(c - fracX * loupeZoom) + 0.5,
+      Math.round(c - fracY * loupeZoom) + 0.5,
+      loupeZoom,
+      loupeZoom
+    );
+
+    // Cruz fina con un hueco central para no tapar el píxel objetivo.
+    const gap = Math.max(loupeZoom, 7);
+    const drawCross = (color, w) => {
+      ctx.strokeStyle = color;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.moveTo(c, 0);
+      ctx.lineTo(c, c - gap);
+      ctx.moveTo(c, c + gap);
+      ctx.lineTo(c, LOUPE_SIZE);
+      ctx.moveTo(0, c);
+      ctx.lineTo(c - gap, c);
+      ctx.moveTo(c + gap, c);
+      ctx.lineTo(LOUPE_SIZE, c);
+      ctx.stroke();
+    };
+    drawCross("rgba(0,0,0,0.85)", 2.5); // contorno oscuro para contraste
+    drawCross("#5fd0d8", 1); // núcleo cian
+
+    // Punto central: marca el píxel exacto que vas a marcar.
     ctx.beginPath();
-    ctx.moveTo(LOUPE_SIZE / 2, 0);
-    ctx.lineTo(LOUPE_SIZE / 2, LOUPE_SIZE);
-    ctx.moveTo(0, LOUPE_SIZE / 2);
-    ctx.lineTo(LOUPE_SIZE, LOUPE_SIZE / 2);
+    ctx.arc(c, c, 2, 0, Math.PI * 2);
+    ctx.fillStyle = "#ffffff";
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(0,0,0,0.85)";
     ctx.stroke();
-  }, [cursor, imageLoaded, dragIndex]);
+  }, [cursor, imageLoaded, loupeZoom]);
 
   // ── Exportar cal.json ────────────────────────────────────
   const exportJson = () => {
@@ -350,10 +470,24 @@ export default function Calibrator({
   const reset = () => {
     setCorners([]);
     setDragIndex(-1);
+    setSelectedIndex(-1);
   };
 
   const ready = corners.length === 4;
   const nextCorner = corners.length < 4 ? corners.length : -1;
+
+  // Micro-guía de orden: qué esquina toca ahora (o cuál estás ajustando), para
+  // no cruzar el orden al calibrar.
+  let guideText;
+  if (dragIndex >= 0 && corners[dragIndex]) {
+    guideText = `Ajustando esquina ${dragIndex + 1}: ${CORNER_LABELS[dragIndex]}`;
+  } else if (nextCorner >= 0) {
+    guideText = `Marca esquina ${nextCorner + 1}: ${CORNER_LABELS[nextCorner]}`;
+  } else if (selectedIndex >= 0 && corners[selectedIndex]) {
+    guideText = `Esquina ${selectedIndex + 1}: ${CORNER_LABELS[selectedIndex]} · flechas = 1 px`;
+  } else {
+    guideText = "4 esquinas listas — clic en una para ajustar";
+  }
 
   return (
     <div className={"wrap" + (embedded ? " embedded" : "")}>
@@ -412,32 +546,26 @@ export default function Calibrator({
                 onMouseUp={onCanvasUp}
                 onMouseLeave={onCanvasLeave}
               />
+              {/* Micro-guía de orden, fija arriba: siempre visible al calibrar */}
+              <div className="guide-pill">{guideText}</div>
               {cursor && (
                 <div
                   className="loupe"
                   style={{
-                    left: Math.max(
-                      12,
-                      Math.min(
-                        cursor.clientX + 24,
-                        typeof window !== "undefined"
-                          ? window.innerWidth - LOUPE_SIZE - 12
-                          : 0
-                      )
-                    ),
-                    // Cuando el cursor está cerca del borde superior, mostrar
-                    // la lupa debajo del cursor para que no se corte arriba.
-                    top:
-                      cursor.clientY - LOUPE_SIZE - 24 < 12
-                        ? cursor.clientY + 24
-                        : cursor.clientY - LOUPE_SIZE - 24,
+                    // Esquina fija del lienzo, opuesta al cursor → no tapa el
+                    // punto que estás marcando.
+                    ...(cursor.fx < 0.5 ? { right: 12 } : { left: 12 }),
+                    ...(cursor.fy < 0.5 ? { bottom: 12 } : { top: 12 }),
                   }}
                 >
-                  <canvas
-                    ref={loupeRef}
-                    width={LOUPE_SIZE}
-                    height={LOUPE_SIZE}
-                  />
+                  <div className="loupe-lens">
+                    <canvas
+                      ref={loupeRef}
+                      width={LOUPE_SIZE}
+                      height={LOUPE_SIZE}
+                    />
+                  </div>
+                  <div className="loupe-cap">{loupeZoom}×</div>
                 </div>
               )}
             </div>
@@ -482,20 +610,24 @@ export default function Calibrator({
           <Section title="Esquinas de la cancha">
             <p className="muted">
               Marca las 4 esquinas en orden. Usa la lupa para clavar el punto.
-              Después puedes arrastrar cualquiera para corregir.
+              Después selecciona una (clic en el punto o en la lista) y ajústala
+              con las flechas: 1 px, o 10 px con Shift.
             </p>
             <ol className="corners">
               {CORNER_LABELS.map((label, i) => {
                 const c = corners[i];
                 const isNext = i === nextCorner;
+                const isSel = i === selectedIndex && !!c;
                 return (
                   <li
                     key={i}
                     className={
                       "corner-row" +
                       (c ? " done" : "") +
-                      (isNext ? " next" : "")
+                      (isNext ? " next" : "") +
+                      (isSel ? " sel" : "")
                     }
+                    onClick={() => c && setSelectedIndex(i)}
                   >
                     <span className="corner-num">{i + 1}</span>
                     <span className="corner-label">{label}</span>
@@ -515,6 +647,32 @@ export default function Calibrator({
                 Reiniciar esquinas
               </button>
             )}
+          </Section>
+
+          <Section title="Lupa">
+            <div className="zoom-ctl">
+              <button
+                className="zoom-btn"
+                onClick={() => setLoupeZoom((z) => clampZoom(z - 1))}
+                disabled={loupeZoom <= LOUPE_MIN_ZOOM}
+                aria-label="Alejar lupa"
+              >
+                −
+              </button>
+              <span className="zoom-val">{loupeZoom}×</span>
+              <button
+                className="zoom-btn"
+                onClick={() => setLoupeZoom((z) => clampZoom(z + 1))}
+                disabled={loupeZoom >= LOUPE_MAX_ZOOM}
+                aria-label="Acercar lupa"
+              >
+                +
+              </button>
+            </div>
+            <p className="muted tiny">
+              También con la rueda del mouse sobre el frame, o las teclas +
+              / −. La cruz con punto central marca el píxel exacto.
+            </p>
           </Section>
 
           <Section title="Tipo de cancha">
@@ -739,16 +897,51 @@ export default function Calibrator({
           cursor: crosshair;
         }
         .loupe {
-          position: fixed;
+          position: absolute;
+          z-index: 50;
+          pointer-events: none;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 4px;
+        }
+        .loupe-lens {
           width: ${LOUPE_SIZE}px;
           height: ${LOUPE_SIZE}px;
           border-radius: 50%;
           overflow: hidden;
           border: 2px solid var(--accent);
           box-shadow: 0 6px 24px rgba(0, 0, 0, 0.7);
-          pointer-events: none;
-          z-index: 50;
           background: var(--bg);
+        }
+        .loupe-cap {
+          font-family: var(--mono);
+          font-size: 10px;
+          line-height: 1;
+          color: var(--accent);
+          background: rgba(10, 10, 10, 0.7);
+          padding: 2px 6px;
+          border-radius: 4px;
+        }
+        .guide-pill {
+          position: absolute;
+          top: 10px;
+          left: 50%;
+          transform: translateX(-50%);
+          z-index: 49;
+          pointer-events: none;
+          font-family: var(--mono);
+          font-size: 11px;
+          letter-spacing: 0.02em;
+          color: var(--accent);
+          background: rgba(10, 10, 10, 0.72);
+          border: 1px solid var(--accent-dim);
+          padding: 4px 10px;
+          border-radius: 999px;
+          white-space: nowrap;
+          max-width: calc(100% - 24px);
+          overflow: hidden;
+          text-overflow: ellipsis;
         }
         .panel {
           border-left: 1px solid var(--border);
@@ -821,10 +1014,15 @@ export default function Calibrator({
         }
         .corner-row.done {
           border-color: var(--border);
+          cursor: pointer;
         }
         .corner-row.next {
           border-color: var(--accent);
           background: var(--surface-2);
+        }
+        .corner-row.sel {
+          border-color: var(--accent);
+          box-shadow: inset 2px 0 0 var(--accent);
         }
         .corner-num {
           font-family: var(--mono);
@@ -870,6 +1068,39 @@ export default function Calibrator({
           background: var(--accent-dim);
           border-color: var(--accent);
           color: var(--text);
+        }
+        .zoom-ctl {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+        }
+        .zoom-btn {
+          width: 34px;
+          height: 34px;
+          border-radius: 6px;
+          background: var(--surface);
+          border: 1px solid var(--border);
+          color: var(--text);
+          font-size: 18px;
+          line-height: 1;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .zoom-btn:not(:disabled):hover {
+          border-color: var(--accent);
+          color: var(--accent);
+        }
+        .zoom-btn:disabled {
+          opacity: 0.4;
+          cursor: not-allowed;
+        }
+        .zoom-val {
+          font-family: var(--mono);
+          font-size: 14px;
+          color: var(--text);
+          min-width: 36px;
+          text-align: center;
         }
         .field {
           margin-bottom: 10px;

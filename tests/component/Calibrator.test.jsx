@@ -187,6 +187,26 @@ describe("Calibrator — carga de archivos", () => {
   });
 });
 
+describe("Calibrator — zoom de la lupa", () => {
+  test("los botones +/− ajustan el zoom mostrado en la sección Lupa", () => {
+    render(<Calibrator />);
+    expect(screen.getByText("6×")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Acercar lupa/i }));
+    expect(screen.getByText("7×")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Alejar lupa/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Alejar lupa/i }));
+    expect(screen.getByText("5×")).toBeInTheDocument();
+  });
+
+  test("el zoom queda clampeado en el mínimo y deshabilita el botón", () => {
+    render(<Calibrator />);
+    const out = screen.getByRole("button", { name: /Alejar lupa/i });
+    for (let i = 0; i < 10; i++) fireEvent.click(out);
+    expect(screen.getByText("2×")).toBeInTheDocument();
+    expect(out).toBeDisabled();
+  });
+});
+
 describe("Calibrator — input ppm robusto", () => {
   test("ppm queda clampeado en [10,120] aún tecleando un valor fuera de rango", () => {
     const { container } = render(<Calibrator />);
