@@ -3,11 +3,12 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import {
   buildCalibration,
-  computeHomography,
+  solveHomography,
   invert3x3,
   projectPoint,
   courtLines,
-  CORNER_LABELS,
+  courtPointUV,
+  referencePoints,
 } from "@/lib/homography";
 
 // Radio de captura para arrastrar una esquina (en px naturales de imagen)
@@ -19,6 +20,13 @@ const LOUPE_MAX_ZOOM = 16;
 const LOUPE_DEFAULT_ZOOM = 6;
 const clampZoom = (z) =>
   Math.max(LOUPE_MIN_ZOOM, Math.min(LOUPE_MAX_ZOOM, Math.round(z)));
+
+// Parsea "ANCHOxALTO" (acepta x, X, *, espacios) → {w,h} o null.
+const parseRes = (str) => {
+  const m = /^\s*(\d{2,5})\s*[x×*]\s*(\d{2,5})\s*$/i.exec(str || "");
+  if (!m) return null;
+  return { w: Number(m[1]), h: Number(m[2]) };
+};
 
 export default function Calibrator({
   embedded = false,
@@ -34,17 +42,27 @@ export default function Calibrator({
 
   const [imageName, setImageName] = useState("");
   const [imageLoaded, setImageLoaded] = useState(false);
-  const [corners, setCorners] = useState([]); // {x,y} en coords naturales
-  const [dragIndex, setDragIndex] = useState(-1);
-  // Esquina "enfocada" para ajuste fino con flechas (independiente del drag).
-  const [selectedIndex, setSelectedIndex] = useState(-1);
+  // Marcas en coords naturales: [{id, x, y}] — cada una ligada a un punto de
+  // referencia conocido (esquina o punto interno de la cancha).
+  const [marks, setMarks] = useState([]);
+  const [dragId, setDragId] = useState(null);
+  // Punto "enfocado": el que se coloca/ajusta al hacer clic o con las flechas.
+  // Arranca en la primera esquina para indicar por dónde empezar.
+  const [selectedId, setSelectedId] = useState("cercana_izq");
   const [loupeZoom, setLoupeZoom] = useState(LOUPE_DEFAULT_ZOOM);
   const [halfCourt, setHalfCourt] = useState(false);
   const [ppm, setPpm] = useState(40);
   const [videoRef, setVideoRef] = useState("video.mp4");
-  const [cursor, setCursor] = useState(null); // {x,y,clientX,clientY}
+  // Resolución objetivo opcional ("ANCHOxALTO") del video que procesará CLARA;
+  // si difiere del frame cargado, se advierte al exportar (bug de cal cruzada).
+  const [expectedRes, setExpectedRes] = useState("");
+  const [cursor, setCursor] = useState(null); // {x,y,clientX,clientY,fx,fy}
   const [naturalSize, setNaturalSize] = useState([0, 0]);
   const [loadError, setLoadError] = useState("");
+
+  // Catálogo de puntos marcables según el tipo de cancha.
+  const catalog = referencePoints(halfCourt);
+  const markById = Object.fromEntries(marks.map((m) => [m.id, m]));
 
   // Flag para evitar setState si la imagen termina de decodificar después
   // del unmount (típico al cambiar de pestaña mientras carga).
@@ -81,9 +99,11 @@ export default function Calibrator({
       imgRef.current = img;
       setNaturalSize([img.naturalWidth, img.naturalHeight]);
       setImageLoaded(true);
-      setCorners([]);
-      setDragIndex(-1);
-      setSelectedIndex(-1);
+      setMarks([]);
+      setDragId(null);
+      // Dejar listo el primer punto para marcar (ambos catálogos empiezan
+      // por la esquina cercana izquierda).
+      setSelectedId("cercana_izq");
     };
     img.onerror = () => {
       URL.revokeObjectURL(url);
@@ -149,24 +169,41 @@ export default function Calibrator({
     };
   };
 
+  // Coloca/mueve la marca de un punto (upsert) preservando el orden.
+  const placeMark = (id, x, y) => {
+    const cx = Math.max(0, Math.min(naturalSize[0], x));
+    const cy = Math.max(0, Math.min(naturalSize[1], y));
+    setMarks((prev) =>
+      prev.some((m) => m.id === id)
+        ? prev.map((m) => (m.id === id ? { id, x: cx, y: cy } : m))
+        : [...prev, { id, x: cx, y: cy }]
+    );
+  };
+
   // ── Eventos de mouse sobre el canvas ─────────────────────
   const onCanvasDown = (e) => {
     if (!imageLoaded) return;
     const p = toNatural(e.clientX, e.clientY);
-    // ¿Tocó una esquina existente? → arrastrar (y enfocarla para las flechas)
-    for (let i = 0; i < corners.length; i++) {
-      const dx = corners[i].x - p.x;
-      const dy = corners[i].y - p.y;
-      if (Math.hypot(dx, dy) < GRAB_RADIUS) {
-        setDragIndex(i);
-        setSelectedIndex(i);
+    // ¿Tocó una marca existente? → seleccionarla y arrastrar
+    for (const m of marks) {
+      if (Math.hypot(m.x - p.x, m.y - p.y) < GRAB_RADIUS) {
+        setDragId(m.id);
+        setSelectedId(m.id);
         return;
       }
     }
-    // Si faltan esquinas, colocar la siguiente y dejarla enfocada
-    if (corners.length < 4) {
-      setSelectedIndex(corners.length);
-      setCorners([...corners, { x: p.x, y: p.y }]);
+    // Si hay un punto seleccionado, colocar/mover su marca aquí.
+    if (selectedId) {
+      const wasMarked = !!markById[selectedId];
+      placeMark(selectedId, p.x, p.y);
+      setDragId(selectedId);
+      // Si es nuevo, avanzar al siguiente punto sin marcar (marcado en orden).
+      if (!wasMarked) {
+        const nextUp = catalog.find(
+          (c) => c.id !== selectedId && !markById[c.id]
+        );
+        if (nextUp) setSelectedId(nextUp.id);
+      }
     }
   };
 
@@ -183,21 +220,10 @@ export default function Calibrator({
     const fx = (e.clientX - rect.left) / rect.width;
     const fy = (e.clientY - rect.top) / rect.height;
     setCursor({ x: p.x, y: p.y, clientX: e.clientX, clientY: e.clientY, fx, fy });
-    // Guard de bounds: si las esquinas se resetearon mientras arrastrábamos
-    // (por ejemplo al cargar un frame nuevo desde el extractor de video),
-    // dragIndex puede haber quedado apuntando fuera del array. Sin esto
-    // generaba esquinas fantasma con índices sparse.
-    if (dragIndex >= 0 && dragIndex < corners.length) {
-      const next = [...corners];
-      next[dragIndex] = {
-        x: Math.max(0, Math.min(naturalSize[0], p.x)),
-        y: Math.max(0, Math.min(naturalSize[1], p.y)),
-      };
-      setCorners(next);
-    }
+    if (dragId) placeMark(dragId, p.x, p.y);
   };
 
-  const onCanvasUp = () => setDragIndex(-1);
+  const onCanvasUp = () => setDragId(null);
   const onCanvasLeave = () => {
     // Solo escondemos la lupa: el drag sigue vivo mientras el botón esté
     // presionado — un mouseup global lo termina (ver useEffect más abajo).
@@ -207,13 +233,13 @@ export default function Calibrator({
   // Mouseup global: termina cualquier drag aunque el usuario suelte el botón
   // fuera del canvas.
   useEffect(() => {
-    if (dragIndex < 0) return;
-    const up = () => setDragIndex(-1);
+    if (!dragId) return;
+    const up = () => setDragId(null);
     window.addEventListener("mouseup", up);
     return () => window.removeEventListener("mouseup", up);
-  }, [dragIndex]);
+  }, [dragId]);
 
-  // Teclado: flechas mueven la esquina enfocada 1 px (Shift = 10 px) para
+  // Teclado: flechas mueven el punto enfocado 1 px (Shift = 10 px) para
   // ajuste fino sin pelear con el mouse; + / − ajustan el zoom de la lupa.
   useEffect(() => {
     if (!imageLoaded) return;
@@ -230,7 +256,7 @@ export default function Calibrator({
         setLoupeZoom((z) => clampZoom(z - 1));
         return;
       }
-      if (selectedIndex < 0) return;
+      if (!selectedId) return;
       const step = e.shiftKey ? 10 : 1;
       let dx = 0;
       let dy = 0;
@@ -240,20 +266,21 @@ export default function Calibrator({
       else if (e.key === "ArrowDown") dy = step;
       else return;
       e.preventDefault();
-      setCorners((prev) => {
-        if (selectedIndex >= prev.length) return prev;
-        const next = [...prev];
-        const c = next[selectedIndex];
-        next[selectedIndex] = {
-          x: Math.max(0, Math.min(naturalSize[0], c.x + dx)),
-          y: Math.max(0, Math.min(naturalSize[1], c.y + dy)),
-        };
-        return next;
-      });
+      setMarks((prev) =>
+        prev.map((m) =>
+          m.id === selectedId
+            ? {
+                id: m.id,
+                x: Math.max(0, Math.min(naturalSize[0], m.x + dx)),
+                y: Math.max(0, Math.min(naturalSize[1], m.y + dy)),
+              }
+            : m
+        )
+      );
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [imageLoaded, selectedIndex, naturalSize]);
+  }, [imageLoaded, selectedId, naturalSize]);
 
   // Rueda del mouse sobre el lienzo: acerca/aleja la lupa. Listener nativo
   // no-pasivo para poder cancelar el scroll de la página.
@@ -280,92 +307,78 @@ export default function Calibrator({
 
     const S = img.naturalWidth / 1000; // escala de trazos según resolución
 
-    // Verificación: cancha proyectada de vuelta sobre el frame
-    if (corners.length === 4) {
+    const refById = Object.fromEntries(
+      referencePoints(halfCourt).map((p) => [p.id, p])
+    );
+
+    // Verificación: cancha proyectada de vuelta sobre el frame usando la
+    // homografía de N puntos (exacta con 4, mínimos cuadrados con 5+).
+    if (marks.length >= 4) {
       try {
-        const courtW = 9 * ppm;
-        const courtH = (halfCourt ? 9 : 18) * ppm;
-        const dst = halfCourt
-          ? [
-              [0, 0],
-              [courtW, 0],
-              [courtW, courtH],
-              [0, courtH],
-            ]
-          : [
-              [courtW, 0],
-              [courtW, courtH],
-              [0, courtH],
-              [0, 0],
-            ];
-        const H = computeHomography(
-          corners.map((c) => [c.x, c.y]),
-          dst
-        );
-        const Hinv = invert3x3(H);
-        const lines = courtLines(halfCourt, ppm);
-        ctx.strokeStyle = "#5fd0d8";
-        ctx.lineWidth = 2.5 * S;
-        ctx.shadowColor = "rgba(0,0,0,0.6)";
-        ctx.shadowBlur = 3 * S;
-        lines.forEach(([a, b]) => {
-          const [ax, ay] = projectPoint(Hinv, a[0], a[1]);
-          const [bx, by] = projectPoint(Hinv, b[0], b[1]);
-          ctx.beginPath();
-          ctx.moveTo(ax, ay);
-          ctx.lineTo(bx, by);
-          ctx.stroke();
-        });
-        ctx.shadowBlur = 0;
+        const src = [];
+        const dst = [];
+        for (const m of marks) {
+          const r = refById[m.id];
+          if (!r) continue;
+          src.push([m.x, m.y]);
+          dst.push(courtPointUV(halfCourt, ppm, r.s, r.t));
+        }
+        if (src.length >= 4) {
+          const H = solveHomography(src, dst);
+          const Hinv = invert3x3(H);
+          const lines = courtLines(halfCourt, ppm);
+          ctx.strokeStyle = "#5fd0d8";
+          ctx.lineWidth = 2.5 * S;
+          ctx.shadowColor = "rgba(0,0,0,0.6)";
+          ctx.shadowBlur = 3 * S;
+          lines.forEach(([a, b]) => {
+            const [ax, ay] = projectPoint(Hinv, a[0], a[1]);
+            const [bx, by] = projectPoint(Hinv, b[0], b[1]);
+            ctx.beginPath();
+            ctx.moveTo(ax, ay);
+            ctx.lineTo(bx, by);
+            ctx.stroke();
+          });
+          ctx.shadowBlur = 0;
+        }
       } catch {
-        /* cuadrilátero inválido — se ignora */
+        /* configuración degenerada — se ignora hasta que el usuario ajuste */
       }
     }
 
-    // Cuadrilátero entre las esquinas marcadas
-    if (corners.length > 1) {
-      ctx.strokeStyle = "rgba(184,122,106,0.55)";
-      ctx.lineWidth = 1.5 * S;
+    // Marcas: esquinas en cálido, puntos internos en cian.
+    marks.forEach((m) => {
+      const r = refById[m.id];
+      const isCorner = r && r.corner !== null;
       ctx.beginPath();
-      ctx.moveTo(corners[0].x, corners[0].y);
-      for (let i = 1; i < corners.length; i++) {
-        ctx.lineTo(corners[i].x, corners[i].y);
-      }
-      if (corners.length === 4) ctx.closePath();
-      ctx.stroke();
-    }
-
-    // Esquinas
-    corners.forEach((c, i) => {
-      ctx.beginPath();
-      ctx.arc(c.x, c.y, 7 * S, 0, Math.PI * 2);
-      ctx.fillStyle = "#b87a6a";
+      ctx.arc(m.x, m.y, 7 * S, 0, Math.PI * 2);
+      ctx.fillStyle = isCorner ? "#b87a6a" : "#5fd0d8";
       ctx.fill();
       ctx.lineWidth = 2 * S;
       ctx.strokeStyle = "#0a0a0a";
       ctx.stroke();
-      // Etiqueta
-      ctx.font = `${13 * S}px ui-monospace, monospace`;
+      // Etiqueta corta
+      ctx.font = `${12 * S}px ui-monospace, monospace`;
       ctx.fillStyle = "#ebe9e3";
       ctx.strokeStyle = "#0a0a0a";
       ctx.lineWidth = 3 * S;
-      const label = String(i + 1);
-      ctx.strokeText(label, c.x + 11 * S, c.y - 9 * S);
-      ctx.fillText(label, c.x + 11 * S, c.y - 9 * S);
+      const label = r ? r.short : "?";
+      ctx.strokeText(label, m.x + 10 * S, m.y - 9 * S);
+      ctx.fillText(label, m.x + 10 * S, m.y - 9 * S);
     });
 
-    // Anillo punteado sobre la esquina enfocada: indica cuál mueven las flechas.
-    if (selectedIndex >= 0 && selectedIndex < corners.length) {
-      const sc = corners[selectedIndex];
+    // Anillo punteado sobre el punto enfocado: indica cuál mueven las flechas.
+    const sm = marks.find((m) => m.id === selectedId);
+    if (sm) {
       ctx.beginPath();
-      ctx.arc(sc.x, sc.y, 13 * S, 0, Math.PI * 2);
+      ctx.arc(sm.x, sm.y, 13 * S, 0, Math.PI * 2);
       ctx.setLineDash([4 * S, 3 * S]);
       ctx.lineWidth = 2 * S;
       ctx.strokeStyle = "#5fd0d8";
       ctx.stroke();
       ctx.setLineDash([]);
     }
-  }, [imageLoaded, corners, halfCourt, ppm, selectedIndex]);
+  }, [imageLoaded, marks, halfCourt, ppm, selectedId]);
 
   // ── Render de la lupa ────────────────────────────────────
   // Nota: durante el arrastre mantenemos la lupa visible — sigue siendo útil
@@ -436,23 +449,46 @@ export default function Calibrator({
   }, [cursor, imageLoaded, loupeZoom]);
 
   // ── Exportar cal.json ────────────────────────────────────
+  const ready = marks.length >= 4;
+  const missing = Math.max(0, 4 - marks.length);
+  const selectedRef = catalog.find((c) => c.id === selectedId) || null;
+  const selectedMarked = !!(selectedId && markById[selectedId]);
+
+  // Resolución objetivo opcional vs. resolución real del frame.
+  const parsedRes = parseRes(expectedRes);
+  const resMismatch =
+    imageLoaded &&
+    parsedRes &&
+    (parsedRes.w !== naturalSize[0] || parsedRes.h !== naturalSize[1]);
+
   const exportJson = () => {
-    if (corners.length !== 4) return;
+    if (marks.length < 4) return;
+    // Aviso de resolución cruzada — no bloquea, el usuario confirma.
+    if (resMismatch) {
+      const ok = window.confirm(
+        `La resolución objetivo (${parsedRes.w}×${parsedRes.h}) no coincide con ` +
+          `el frame cargado (${naturalSize[0]}×${naturalSize[1]}).\n\n` +
+          `El cal.json se generará para ${naturalSize[0]}×${naturalSize[1]}. Si ` +
+          `CLARA procesa un video de otra resolución, la calibración fallará.\n\n` +
+          `¿Exportar de todos modos?`
+      );
+      if (!ok) return;
+    }
     let cal;
     try {
       cal = buildCalibration({
-        corners: corners.map((c) => [c.x, c.y]),
+        points: marks,
         frameShape: [naturalSize[1], naturalSize[0]],
         halfCourt,
         videoReference: videoRef,
         ppm,
       });
     } catch (err) {
-      // Esquinas degeneradas (colineales o coincidentes) → homografía inválida
+      // Puntos degenerados (colineales o coincidentes) → homografía inválida
       alert(
         "No se pudo calcular la homografía: " +
-          (err?.message || "esquinas inválidas") +
-          ".\nAjusta las esquinas y vuelve a intentar."
+          (err?.message || "puntos inválidos") +
+          ".\nAjusta los puntos y vuelve a intentar."
       );
       return;
     }
@@ -468,25 +504,32 @@ export default function Calibrator({
   };
 
   const reset = () => {
-    setCorners([]);
-    setDragIndex(-1);
-    setSelectedIndex(-1);
+    setMarks([]);
+    setDragId(null);
+    setSelectedId("cercana_izq");
   };
 
-  const ready = corners.length === 4;
-  const nextCorner = corners.length < 4 ? corners.length : -1;
+  // Cambiar el tipo de cancha cambia el catálogo de puntos; reiniciamos las
+  // marcas para no dejar ids huérfanos del catálogo anterior.
+  const changeCourt = (half) => {
+    if (half === halfCourt) return;
+    setHalfCourt(half);
+    setMarks([]);
+    setDragId(null);
+    setSelectedId("cercana_izq");
+  };
 
-  // Micro-guía de orden: qué esquina toca ahora (o cuál estás ajustando), para
-  // no cruzar el orden al calibrar.
+  // Micro-guía: qué punto toca marcar ahora o cuál estás ajustando.
   let guideText;
-  if (dragIndex >= 0 && corners[dragIndex]) {
-    guideText = `Ajustando esquina ${dragIndex + 1}: ${CORNER_LABELS[dragIndex]}`;
-  } else if (nextCorner >= 0) {
-    guideText = `Marca esquina ${nextCorner + 1}: ${CORNER_LABELS[nextCorner]}`;
-  } else if (selectedIndex >= 0 && corners[selectedIndex]) {
-    guideText = `Esquina ${selectedIndex + 1}: ${CORNER_LABELS[selectedIndex]} · flechas = 1 px`;
+  const draggingRef = dragId ? catalog.find((c) => c.id === dragId) : null;
+  if (draggingRef) {
+    guideText = `Ajustando: ${draggingRef.label}`;
+  } else if (selectedRef && !selectedMarked) {
+    guideText = `Marca: ${selectedRef.label}`;
+  } else if (selectedRef && selectedMarked) {
+    guideText = `${selectedRef.label} · flechas = 1 px`;
   } else {
-    guideText = "4 esquinas listas — clic en una para ajustar";
+    guideText = "Elige un punto en el panel para marcar";
   }
 
   return (
@@ -607,44 +650,47 @@ export default function Calibrator({
             )}
           </Section>
 
-          <Section title="Esquinas de la cancha">
+          <Section title="Puntos de referencia">
             <p className="muted">
-              Marca las 4 esquinas en orden. Usa la lupa para clavar el punto.
-              Después selecciona una (clic en el punto o en la lista) y ajústala
-              con las flechas: 1 px, o 10 px con Shift.
+              Marca al menos 4 puntos que <strong>sí</strong> se vean — esquinas
+              o puntos internos de la cancha. Elige uno en la lista, clic en el
+              frame (usa la lupa), y afina con las flechas (Shift = 10 px).
+              Puedes arrastrar para corregir.
             </p>
-            <ol className="corners">
-              {CORNER_LABELS.map((label, i) => {
-                const c = corners[i];
-                const isNext = i === nextCorner;
-                const isSel = i === selectedIndex && !!c;
+            <div className="pts-count">
+              <span className={ready ? "ok" : "warn"}>{marks.length}</span>{" "}
+              marcado{marks.length === 1 ? "" : "s"} · mínimo 4
+            </div>
+            <ul className="corners">
+              {catalog.map((c) => {
+                const m = markById[c.id];
+                const isSel = c.id === selectedId;
                 return (
                   <li
-                    key={i}
+                    key={c.id}
                     className={
                       "corner-row" +
-                      (c ? " done" : "") +
-                      (isNext ? " next" : "") +
+                      (m ? " done" : "") +
                       (isSel ? " sel" : "")
                     }
-                    onClick={() => c && setSelectedIndex(i)}
+                    onClick={() => setSelectedId(c.id)}
                   >
-                    <span className="corner-num">{i + 1}</span>
-                    <span className="corner-label">{label}</span>
+                    <span className="corner-num">{c.short}</span>
+                    <span className="corner-label">{c.label}</span>
                     <span className="corner-coord">
-                      {c
-                        ? `${Math.round(c.x)}, ${Math.round(c.y)}`
-                        : isNext
-                        ? "← marca esta"
+                      {m
+                        ? `${Math.round(m.x)}, ${Math.round(m.y)}`
+                        : isSel
+                        ? "← marca este"
                         : "—"}
                     </span>
                   </li>
                 );
               })}
-            </ol>
-            {corners.length > 0 && (
+            </ul>
+            {marks.length > 0 && (
               <button className="btn ghost" onClick={reset}>
-                Reiniciar esquinas
+                Reiniciar puntos
               </button>
             )}
           </Section>
@@ -679,17 +725,20 @@ export default function Calibrator({
             <div className="seg">
               <button
                 className={!halfCourt ? "seg-on" : ""}
-                onClick={() => setHalfCourt(false)}
+                onClick={() => changeCourt(false)}
               >
                 Completa 9×18
               </button>
               <button
                 className={halfCourt ? "seg-on" : ""}
-                onClick={() => setHalfCourt(true)}
+                onClick={() => changeCourt(true)}
               >
                 Media 9×9
               </button>
             </div>
+            <p className="muted tiny">
+              Cambiar el tipo de cancha reinicia los puntos marcados.
+            </p>
           </Section>
 
           <Section title="Avanzado">
@@ -721,6 +770,30 @@ export default function Calibrator({
                 onChange={(e) => setVideoRef(e.target.value)}
               />
             </div>
+            <div className="field">
+              <label>Resolución del video (opcional)</label>
+              <input
+                type="text"
+                value={expectedRes}
+                placeholder={
+                  imageLoaded
+                    ? `${naturalSize[0]}x${naturalSize[1]}`
+                    : "ej. 1920x1080"
+                }
+                onChange={(e) => setExpectedRes(e.target.value)}
+              />
+              {resMismatch ? (
+                <p className="res-warn" role="alert">
+                  ⚠ No coincide con el frame ({naturalSize[0]}×{naturalSize[1]}).
+                  El cal.json es válido solo a la resolución del frame.
+                </p>
+              ) : (
+                <p className="muted tiny">
+                  Si CLARA procesa otra resolución que el frame, avisamos al
+                  exportar.
+                </p>
+              )}
+            </div>
           </Section>
 
           {/* Verificación + export */}
@@ -728,12 +801,11 @@ export default function Calibrator({
             {ready ? (
               <p className="verify-ok">
                 ✓ Cancha proyectada en cian. Verifica que calce con las líneas
-                reales antes de exportar — si no, arrastra las esquinas.
+                reales antes de exportar — si no, arrastra los puntos.
               </p>
             ) : (
               <p className="verify-wait">
-                Faltan {4 - corners.length} esquina
-                {4 - corners.length === 1 ? "" : "s"}.
+                Faltan {missing} punto{missing === 1 ? "" : "s"} (mínimo 4).
               </p>
             )}
             <button
@@ -1011,30 +1083,32 @@ export default function Calibrator({
           background: var(--surface);
           border: 1px solid transparent;
           font-size: 12px;
+          cursor: pointer;
+        }
+        .corner-row:hover {
+          border-color: var(--border-strong);
         }
         .corner-row.done {
           border-color: var(--border);
-          cursor: pointer;
-        }
-        .corner-row.next {
-          border-color: var(--accent);
-          background: var(--surface-2);
         }
         .corner-row.sel {
           border-color: var(--accent);
+          background: var(--surface-2);
           box-shadow: inset 2px 0 0 var(--accent);
         }
         .corner-num {
           font-family: var(--mono);
-          width: 18px;
+          min-width: 22px;
           height: 18px;
+          padding: 0 5px;
           border-radius: 4px;
           background: var(--bg);
           color: var(--text-dim);
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 11px;
+          font-size: 10.5px;
+          flex-shrink: 0;
         }
         .corner-row.done .corner-num {
           background: var(--accent-dim);
@@ -1047,9 +1121,31 @@ export default function Calibrator({
           font-family: var(--mono);
           font-size: 11px;
           color: var(--text-dim);
+          white-space: nowrap;
         }
-        .corner-row.next .corner-coord {
+        .corner-row.sel .corner-coord {
           color: var(--accent);
+        }
+        .pts-count {
+          font-size: 12px;
+          color: var(--text-dim);
+          margin-top: 2px;
+        }
+        .pts-count .ok {
+          color: var(--ok);
+          font-family: var(--mono);
+          font-weight: 600;
+        }
+        .pts-count .warn {
+          color: var(--accent);
+          font-family: var(--mono);
+          font-weight: 600;
+        }
+        .res-warn {
+          font-size: 11px;
+          line-height: 1.5;
+          margin-top: 6px;
+          color: var(--bad, #b83c3c);
         }
         .seg {
           display: flex;
