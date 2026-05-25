@@ -20,15 +20,21 @@ mapeo.
 MIRA resuelve eso:
 
 1. Cargas un **frame** de tu video (una imagen).
-2. Marcas las **4 esquinas** de la cancha, en orden. Cada vez que mueves el
-   cursor aparece una **lupa con zoom** para clavar el punto exacto — incluso
-   con jugadoras tapando la esquina.
-3. Puedes **arrastrar** cualquier esquina para corregir.
-4. **Verificación en vivo:** apenas tienes las 4 esquinas, MIRA dibuja la cancha
-   proyectada de vuelta sobre el frame, en cian. Si las líneas cian calzan con
-   las líneas reales de la cancha, calibraste bien. Si no, arrastras y lo ves
-   al instante — sin correr todo el pipeline para descubrirlo.
-5. Exporta **`cal.json`** — el archivo exacto que come CLARA.
+2. Marcas **al menos 4 puntos de referencia** que se vean en el frame. No tienen
+   que ser las 4 esquinas: si alguna no se ve (ángulo, oclusión, encuadre),
+   marcas puntos internos conocidos — intersecciones de la línea de ataque o la
+   central con las bandas, o los puntos medios de las líneas de fondo. Eliges en
+   el panel qué punto vas a marcar y haces clic; una **lupa con zoom** ayuda a
+   clavar el píxel exacto.
+3. Con **4 puntos** se usa homografía exacta; con **5 o más**, mínimos cuadrados
+   (más robusto al ruido de marcado). Puedes **arrastrar** o usar las **flechas**
+   (1 px, Shift = 10 px) para afinar cualquier punto.
+4. **Verificación en vivo:** con 4+ puntos, MIRA dibuja la cancha proyectada de
+   vuelta sobre el frame, en cian. Si las líneas cian calzan con las reales,
+   calibraste bien. Si no, ajustas y lo ves al instante.
+5. Exporta **`cal.json`** — el archivo exacto que come CLARA (con un campo
+   `reference_points` extra cuando marcas puntos no-esquina). MIRA avisa si la
+   resolución objetivo no coincide con la del frame.
 
 La matemática de homografía corre en el navegador, en JavaScript puro
 (`lib/homography.js`). Es idéntica a `cv2.findHomography` — verificado a 6

@@ -66,18 +66,76 @@ describe("Calibrator — estado inicial", () => {
     expect(screen.getByText(/Ningún frame cargado/i)).toBeInTheDocument();
   });
 
-  test("muestra las 4 esquinas en orden con la primera marcada como 'siguiente'", () => {
+  test("muestra las 4 esquinas con la primera marcada como 'siguiente'", () => {
     render(<Calibrator />);
     expect(screen.getByText("Cercana izquierda")).toBeInTheDocument();
     expect(screen.getByText("Cercana derecha")).toBeInTheDocument();
     expect(screen.getByText("Lejana derecha")).toBeInTheDocument();
     expect(screen.getByText("Lejana izquierda")).toBeInTheDocument();
-    expect(screen.getByText(/← marca esta/)).toBeInTheDocument();
+    expect(screen.getByText(/← marca este/)).toBeInTheDocument();
   });
 
-  test("el botón Exportar empieza deshabilitado", () => {
+  test("el botón Exportar empieza deshabilitado (0 puntos < 4)", () => {
     render(<Calibrator />);
     expect(screen.getByRole("button", { name: /Exportar cal\.json/i })).toBeDisabled();
+  });
+
+  test("muestra el contador de puntos y que faltan para el mínimo", () => {
+    const { container } = render(<Calibrator />);
+    expect(container.querySelector(".pts-count")).toHaveTextContent(
+      "0 marcados · mínimo 4"
+    );
+    expect(screen.getByText(/Faltan 4 puntos/i)).toBeInTheDocument();
+  });
+});
+
+describe("Calibrator — puntos de referencia flexibles", () => {
+  test("cancha completa ofrece puntos internos además de las esquinas", () => {
+    render(<Calibrator />);
+    expect(screen.getByText("Central ∩ banda izq.")).toBeInTheDocument();
+    expect(screen.getByText("Central ∩ banda der.")).toBeInTheDocument();
+    expect(screen.getByText("Ataque (cerca) ∩ banda izq.")).toBeInTheDocument();
+    expect(screen.getByText("Medio fondo lejano")).toBeInTheDocument();
+  });
+
+  test("cambiar a media cancha cambia el catálogo de puntos", () => {
+    render(<Calibrator />);
+    // En completa existe la línea central; en media no.
+    expect(screen.getByText("Central ∩ banda izq.")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Media 9×9/i }));
+    expect(screen.queryByText("Central ∩ banda izq.")).not.toBeInTheDocument();
+    expect(screen.getByText("Medio de la red")).toBeInTheDocument();
+  });
+
+  test("seleccionar un punto en la lista lo marca como 'siguiente'", () => {
+    render(<Calibrator />);
+    // Por defecto la esquina cercana izquierda es la seleccionada.
+    fireEvent.click(screen.getByText("Lejana derecha"));
+    // Esa fila ahora muestra el indicador de "marca este".
+    const row = screen.getByText("Lejana derecha").closest("li");
+    expect(row).toHaveClass("sel");
+  });
+});
+
+describe("Calibrator — validación de resolución", () => {
+  test("advierte cuando la resolución objetivo no coincide con el frame", async () => {
+    installImageMock({ w: 1280, h: 720 });
+    const { container } = render(<Calibrator />);
+    const fileInput = container.querySelector('input[type="file"]');
+    fireEvent.change(fileInput, {
+      target: { files: [new File(["x"], "frame.png", { type: "image/png" })] },
+    });
+    await waitFor(() => expect(screen.getByText("1280 × 720")).toBeInTheDocument());
+
+    // El campo de resolución toma el placeholder con la resolución del frame.
+    const resInput = container.querySelector('input[placeholder="1280x720"]');
+    expect(resInput).toBeInTheDocument();
+    fireEvent.change(resInput, { target: { value: "848x478" } });
+    expect(screen.getByText(/No coincide con el frame/i)).toBeInTheDocument();
+
+    // Si coincide, no hay advertencia.
+    fireEvent.change(resInput, { target: { value: "1280x720" } });
+    expect(screen.queryByText(/No coincide con el frame/i)).not.toBeInTheDocument();
   });
 });
 
@@ -184,6 +242,26 @@ describe("Calibrator — carga de archivos", () => {
     errSpy.mockRestore();
     // Y la URL debe haberse revocado en el cleanup.
     expect(revokedUrls).toContain(createdUrls[0]);
+  });
+});
+
+describe("Calibrator — zoom de la lupa", () => {
+  test("los botones +/− ajustan el zoom mostrado en la sección Lupa", () => {
+    render(<Calibrator />);
+    expect(screen.getByText("6×")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Acercar lupa/i }));
+    expect(screen.getByText("7×")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Alejar lupa/i }));
+    fireEvent.click(screen.getByRole("button", { name: /Alejar lupa/i }));
+    expect(screen.getByText("5×")).toBeInTheDocument();
+  });
+
+  test("el zoom queda clampeado en el mínimo y deshabilita el botón", () => {
+    render(<Calibrator />);
+    const out = screen.getByRole("button", { name: /Alejar lupa/i });
+    for (let i = 0; i < 10; i++) fireEvent.click(out);
+    expect(screen.getByText("2×")).toBeInTheDocument();
+    expect(out).toBeDisabled();
   });
 });
 
